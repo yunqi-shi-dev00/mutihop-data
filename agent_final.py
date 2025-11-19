@@ -1,7 +1,9 @@
 """
-半导体QA生成系统 - 优化Agent
-真正的融合：在SELECT action内部添加筛选和答案重生成
-保持原版核心完全不变
+半导体QA生成系统 - 最终优化Agent
+完全按用户要求：
+1. 每次SELECT用所有子QA生成多跳问题（而不是只组合2个）
+2. 使用用户给的组合模板（带推理步骤）
+3. 筛选 → 答案重生成（强调围绕子QA，不发散）
 """
 
 import json
@@ -13,20 +15,20 @@ from collections import defaultdict
 from typing import Dict, List, Any, Optional
 from transformers import AutoTokenizer
 
-from prompts_optimized import SemiconductorQAPrompts
+from prompts_final import SemiconductorQAPrompts
 from knowledge_base import EnhancedSemiconductorKB, SemiconductorQAEntity, AgentMemory
 from llm_client import LLMAPIClient
 
 
-class OptimizedSemiconductorQAAgent:
+class FinalSemiconductorQAAgent:
     """
-    优化版Agent - 在原版SELECT action内部融合筛选和答案重生成
+    最终优化Agent - 完全按用户要求
     
-    核心思路：
+    核心逻辑：
     1. 保持action机制不变（SELECT/FUZZ/EXIT/BRAINSTORM）
     2. 保持迭代循环结构不变
-    3. 在SELECT执行时：组合 → 筛选 → 答案重生成
-    4. 多跳自然形成：SELECT执行N次 = N跳
+    3. 每次SELECT：收集新子QA → 用所有子QA生成多跳问题 → 筛选 → 答案重生成
+    4. 多跳自然形成：SELECT执行N次 = (N+1)跳
     """
     
     def __init__(self, knowledge_base: EnhancedSemiconductorKB, 
@@ -37,25 +39,12 @@ class OptimizedSemiconductorQAAgent:
                  enable_qa_filtering: bool = True,
                  enable_answer_regeneration: bool = True,
                  debug_mode: bool = True):
-        """
-        初始化优化Agent
-        
-        Args:
-            knowledge_base: 知识库
-            llm_client: LLM客户端
-            tokenizer_path: tokenizer路径
-            max_turns: 最大迭代轮数
-            use_dynamic_planning: 是否使用动态规划
-            enable_qa_filtering: 是否在SELECT后筛选问题
-            enable_answer_regeneration: 是否在SELECT后重生成答案
-            debug_mode: 是否输出调试信息
-        """
         self.kb = knowledge_base
         self.llm_client = llm_client
         self.max_turns = max_turns
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         
-        # 动态规划开关
+        # 动态规划
         self.use_dynamic_planning = use_dynamic_planning
         if use_dynamic_planning:
             self.current_stage = 'early'
@@ -64,7 +53,7 @@ class OptimizedSemiconductorQAAgent:
         else:
             print(f"[Agent] 使用原版生成策略")
         
-        # 🔧 优化功能开关（在SELECT内部执行）
+        # 优化功能开关
         self.enable_qa_filtering = enable_qa_filtering
         self.enable_answer_regeneration = enable_answer_regeneration
         self.debug_mode = debug_mode
@@ -72,11 +61,11 @@ class OptimizedSemiconductorQAAgent:
         if enable_qa_filtering:
             print(f"[Agent] ✓ 启用问题筛选（在SELECT后执行）")
         if enable_answer_regeneration:
-            print(f"[Agent] ✓ 启用答案重生成（在SELECT后执行）")
+            print(f"[Agent] ✓ 启用答案重生成（在SELECT后执行，强调围绕子QA）")
         if debug_mode:
             print(f"[Agent] ✓ 启用调试模式")
     
-    # ============ 阶段管理（动态规划）============
+    # ============ 阶段管理 ============
     
     def update_generation_stage(self):
         """更新生成阶段"""
@@ -113,7 +102,7 @@ class OptimizedSemiconductorQAAgent:
                 return self.kb.select_underutilized_qa()
             else:
                 return random.choice(self.kb.qa_ids)
-        else:  # late
+        else:
             return self.kb.select_underutilized_qa()
     
     # ============ LLM调用 ============
@@ -146,38 +135,29 @@ class OptimizedSemiconductorQAAgent:
     async def extract_qa_info(self, entity: SemiconductorQAEntity) -> SemiconductorQAEntity:
         """提取QA信息"""
         if self.debug_mode:
-            print(f"    [提取] 实体 {entity.id} 关键信息...")
+            print(f"    [提取] 实体 {entity.id}")
         
-        # 提取关键概念
         try:
             content = entity.qa_data.get('question', '') + ' ' + entity.qa_data.get('answer', '')
             prompt = SemiconductorQAPrompts.extract_key_concepts.format(content=content)
             text = await self.call_llm(prompt, temperature=0.7)
-            
             concepts_list = json.loads(text.split('```json')[1].split('```')[0].strip())
             entity.key_concepts = [item['concept'] for item in concepts_list]
-        except Exception as e:
-            if self.debug_mode:
-                print(f"    [提取] 关键概念提取失败: {e}")
+        except:
             entity.key_concepts = []
         
-        # 提取摘要
         try:
             question = entity.qa_data.get('question', '')
             answer = entity.qa_data.get('answer', '')
             prompt = SemiconductorQAPrompts.summarize_qa.format(question=question, answer=answer)
             text = await self.call_llm(prompt, temperature=0.7)
-            
             if '<summary>' in text and '</summary>' in text:
                 entity.summary = text.split('<summary>')[1].split('</summary>')[0].strip()
             else:
                 entity.summary = text[:100]
-        except Exception as e:
-            if self.debug_mode:
-                print(f"    [提取] 摘要提取失败: {e}")
+        except:
             entity.summary = "待生成"
         
-        # 查找相关QA
         if self.use_dynamic_planning:
             entity.related_qas = self.kb.find_related_qas_prioritized(entity.id, top_k=10)
         else:
@@ -185,17 +165,16 @@ class OptimizedSemiconductorQAAgent:
         
         return entity
     
-    # ============ QA构建方法 ============
+    # ============ QA构建 ============
     
     async def construct_base_qa(self, entity: SemiconductorQAEntity) -> Dict:
         """构建基础QA"""
         if self.debug_mode:
-            print(f"    [构建] 基础QA...")
+            print(f"    [构建] 基础QA")
         
         content = entity.repr()
         prompt = SemiconductorQAPrompts.base_qa.format(content=content)
         text = await self.call_llm(prompt)
-        
         base_qa = json.loads(text.split('```json')[1].split('```')[0].strip())
         return base_qa
     
@@ -203,7 +182,7 @@ class OptimizedSemiconductorQAAgent:
                                 entityB: SemiconductorQAEntity) -> Dict:
         """构建关联QA"""
         if self.debug_mode:
-            print(f"    [桥联] 连接 {entityA.id} 和 {entityB.id}...")
+            print(f"    [桥联] {entityA.id} → {entityB.id}")
         
         prompt = SemiconductorQAPrompts.link_qa.format(
             conceptA=entityA.name,
@@ -215,116 +194,121 @@ class OptimizedSemiconductorQAAgent:
         link_qa = json.loads(text.split('```json')[1].split('```')[0].strip())
         return link_qa
     
-    async def combine_qa(self, questionA: Dict, questionB: Dict, memory: AgentMemory) -> Dict:
-        """
-        组合两个问答（生成参考答案）
-        注意：这里生成的answer是参考答案，后续会重新生成最终答案
-        """
-        if self.debug_mode:
-            print(f"    [合成] 组合问答（生成参考答案）...")
-        
-        prompt = SemiconductorQAPrompts.compose_qa.format(
-            questionA=json.dumps({'question': questionA['question'], 'answer': questionA['answer']}, ensure_ascii=False),
-            questionB=json.dumps({'question': questionB['question'], 'answer': questionB['answer']}, ensure_ascii=False),
-            statements=memory.statements_repr(additional=[questionB['statement']])
-        )
-        text = await self.call_llm(prompt)
-        combined = json.loads(text.split('```json')[1].split('```')[0].strip())
-        return combined
+    # ============ ⭐ 关键：用所有子QA生成多跳问题 ============
     
-    # ============ 🔧 优化：在SELECT后执行的筛选和答案重生成 ============
-    
-    async def evaluate_question_inline(self, question: str, 
-                                       relevant_entities: List[SemiconductorQAEntity]) -> Dict:
+    async def generate_multihop_question(self, all_sub_qas: List[SemiconductorQAEntity],
+                                        statements: List[str]) -> Dict:
         """
-        🔧 在SELECT后立即评估问题
+        ⭐ 核心方法：基于所有已收集的子QA，生成多跳问题
         
         Args:
-            question: 组合后的问题
-            relevant_entities: 已使用的相关实体列表
+            all_sub_qas: 所有已收集的子QA实体列表
+            statements: 技术陈述列表
         
         Returns:
-            评估结果 {'passed': bool, 'reason': str}
+            包含question, answer(参考答案), reasoning_steps等的字典
         """
-        if self.debug_mode:
-            print(f"    [筛选] 评估问题质量...")
+        num_hops = len(all_sub_qas)
         
-        # 格式化子问答对
-        sub_qa_content = "\n\n".join([
-            f"子问答对-{i+1}:\n"
-            f"问题: {e.qa_data['question']}\n"
-            f"答案: {e.qa_data['answer']}\n"
-            f"来源: {e.qa_data.get('paper_name', 'unknown')}"
-            for i, e in enumerate(relevant_entities)
+        if self.debug_mode:
+            print(f"    [多跳组合] 基于{num_hops}个子QA生成{num_hops}跳问题")
+        
+        # 格式化单跳QA
+        single_hop_str = "\n\n".join([
+            f"单跳QA-{i+1}:\n"
+            f"问题: {qa.qa_data['question']}\n"
+            f"答案: {qa.qa_data['answer']}\n"
+            f"来源: {qa.qa_data.get('paper_name', 'unknown')}"
+            for i, qa in enumerate(all_sub_qas)
         ])
         
-        # 调用评估模板
+        # 格式化陈述
+        statements_str = "\n".join(statements)
+        
+        # 调用用户给的多跳组合模板
+        prompt = SemiconductorQAPrompts.compose_qa_multihop.format(
+            num_hops=num_hops,
+            single_hop_qas=single_hop_str,
+            statements=statements_str
+        )
+        
+        try:
+            text = await self.call_llm(prompt, temperature=0.8)
+            result = json.loads(text.split('```json')[1].split('```')[0].strip())
+            
+            if self.debug_mode:
+                print(f"    [多跳组合] 成功生成{num_hops}跳问题")
+                print(f"    [多跳组合] 问题: {result['question'][:60]}...")
+            
+            return result
+        except Exception as e:
+            if self.debug_mode:
+                print(f"    [多跳组合] 失败: {e}")
+            return None
+    
+    # ============ 筛选和答案重生成 ============
+    
+    async def evaluate_question(self, question: str, sub_qas: List[SemiconductorQAEntity]) -> Dict:
+        """筛选问题（用户给的评估模板）"""
+        if self.debug_mode:
+            print(f"    [筛选] 评估问题")
+        
+        sub_qa_content = "\n\n".join([
+            f"子问答对-{i+1}:\n"
+            f"问题: {qa.qa_data['question']}\n"
+            f"答案: {qa.qa_data['answer']}\n"
+            f"来源: {qa.qa_data.get('paper_name', 'unknown')}"
+            for i, qa in enumerate(sub_qas)
+        ])
+        
         prompt = SemiconductorQAPrompts.question_evaluation.format(
             sub_qa_content=sub_qa_content,
-            question_to_evaluate=question
+            academic_question=question
         )
         
         try:
             text = await self.call_llm(prompt, temperature=0.3)
             
-            # 解析评估结果
             if '【是】' in text:
                 passed = True
-                reason = "问题通过所有评估标准"
+                reason = "通过所有6个评估标准"
             elif '【否】' in text:
                 passed = False
-                reason = "问题未通过评估标准"
+                reason = "未通过评估标准"
             else:
                 passed = False
-                reason = f"评估格式异常: {text[:50]}"
+                reason = f"格式异常: {text[:50]}"
             
             if self.debug_mode:
                 print(f"    [筛选] {'✓ 通过' if passed else '✗ 未通过'}")
             
-            return {'passed': passed, 'reason': reason, 'raw_response': text}
-            
+            return {'passed': passed, 'reason': reason}
         except Exception as e:
             if self.debug_mode:
-                print(f"    [筛选] 评估失败: {e}")
-            return {'passed': False, 'reason': f"评估异常: {str(e)}", 'raw_response': ""}
+                print(f"    [筛选] 异常: {e}")
+            return {'passed': False, 'reason': str(e)}
     
-    async def regenerate_answer_inline(self, question: str, reference_answer: str,
-                                       relevant_entities: List[SemiconductorQAEntity],
-                                       statements: List[str]) -> Dict:
-        """
-        🔧 在SELECT后立即重生成答案（参考答案 → 最终答案）
-        
-        强调：基于子QA，不发散，避免引入错误
-        
-        Args:
-            question: 组合后的问题
-            reference_answer: 组合时生成的参考答案
-            relevant_entities: 已使用的相关实体列表
-            statements: 技术陈述列表
-        
-        Returns:
-            生成结果
-        """
+    async def regenerate_answer(self, question: str, reference_answer: str,
+                                sub_qas: List[SemiconductorQAEntity],
+                                reasoning_steps: List[str]) -> Dict:
+        """答案重生成（用户给的模板，强调围绕子QA）"""
         if self.debug_mode:
-            print(f"    [答案] 重新生成最终答案（基于子QA）...")
+            print(f"    [答案] 重新生成（强调围绕子QA，不发散）")
         
-        # 格式化子问答对
         sub_qa_str = "\n\n".join([
             f"子问答对-{i+1}:\n"
-            f"问题: {e.qa_data['question']}\n"
-            f"答案: {e.qa_data['answer']}"
-            for i, e in enumerate(relevant_entities)
+            f"问题: {qa.qa_data['question']}\n"
+            f"答案: {qa.qa_data['answer']}"
+            for i, qa in enumerate(sub_qas)
         ])
         
-        # 格式化技术陈述
-        statements_str = "\n".join(statements)
+        reasoning_str = "\n".join(reasoning_steps) if reasoning_steps else "无"
         
-        # 调用答案生成模板
         prompt = SemiconductorQAPrompts.answer_regeneration.format(
             question=question,
             reference_answer=reference_answer,
             sub_qa_pairs=sub_qa_str,
-            statements=statements_str
+            reasoning_steps=reasoning_str
         )
         
         try:
@@ -333,15 +317,13 @@ class OptimizedSemiconductorQAAgent:
             
             if self.debug_mode:
                 grounded = result.get('grounded_check', {})
-                print(f"    [答案] 生成成功")
-                print(f"    [答案] 置信度: {result.get('confidence', 0.0):.2f}")
+                print(f"    [答案] 成功，置信度: {result.get('confidence', 0):.2f}")
                 print(f"    [答案] 基于子QA: {grounded.get('all_info_from_subqa', False)}")
             
             return result
-            
         except Exception as e:
             if self.debug_mode:
-                print(f"    [答案] 生成失败: {e}")
+                print(f"    [答案] 失败: {e}")
             return {
                 'final_answer': reference_answer,
                 'reasoning_trace': '',
@@ -377,7 +359,7 @@ class OptimizedSemiconductorQAAgent:
         assert action['action'] in ['SELECT', 'FUZZ', 'EXIT', 'BRAINSTORM']
         return action
     
-    # ============ 验证和检查方法 ============
+    # ============ 验证和检查 ============
     
     async def check_info_cover(self, statement: str, prior_statements: str) -> bool:
         """检查信息覆盖"""
@@ -395,20 +377,6 @@ class OptimizedSemiconductorQAAgent:
         text = await self.call_llm(prompt, temperature=0.3)
         result = json.loads(text.split('```json')[1].split('```')[0].strip())
         return 'yes' in result['judgement']
-    
-    async def check_alternative_answer(self, question: str, gt_answer: str,
-                                      pred_answer: str, statements: str) -> bool:
-        """检查替代答案"""
-        prompt = SemiconductorQAPrompts.check_alternative_ans.format(
-            question=question,
-            gt_answer=gt_answer,
-            pred_answer=pred_answer,
-            statements=statements
-        )
-        text = await self.call_llm(prompt, temperature=0.3)
-        return 'yes' in text.lower()
-    
-    # ============ 直接生成和LLM判断 ============
     
     async def direct_generate(self, question: str, n: int = 1) -> List[str]:
         """直接生成答案"""
@@ -460,21 +428,21 @@ class OptimizedSemiconductorQAAgent:
                 corrects.append('Correct' in text)
         return corrects
     
-    # ============ 🎯 主生成流程（在SELECT内部融合优化）============
+    # ============ ⭐ 主生成流程 ============
     
     async def generate(self, semaphore: asyncio.Semaphore, save_path: str):
         """
-        生成一个复杂QA
+        主生成流程
         
-        核心优化：在SELECT action执行时，组合 → 筛选 → 答案重生成
+        核心：每次SELECT收集新子QA后，用所有子QA重新生成多跳问题
         """
         async with semaphore:
             if self.debug_mode:
                 print(f"\n{'='*80}")
-                print(f"[开始] 新的QA生成任务")
+                print(f"[开始] 新QA生成")
                 print(f"{'='*80}")
             
-            # Step 1: 智能选择根QA
+            # Step 1: 选择根QA
             root_id = self.select_root_qa_smart()
             root_qa_data = self.kb.get_qa(root_id)
             
@@ -482,12 +450,11 @@ class OptimizedSemiconductorQAAgent:
             memory.uid = str(uuid.uuid4())
             
             print(f"\n{'='*60}")
-            print(f"[START] 生成QA，根实体: QA-{root_id}")
+            print(f"[START] 根实体: QA-{root_id}")
             if self.use_dynamic_planning:
                 print(f"        阶段: {self.current_stage}")
             print(f"{'='*60}\n")
             
-            # 更新使用统计
             self.kb.update_usage([root_id])
             
             # 创建根实体
@@ -510,15 +477,14 @@ class OptimizedSemiconductorQAAgent:
             memory.qa['answer'] = base_qa['answer']
             memory.statements.append(base_qa['statement'])
             memory.qa_history.append(base_qa)
-            memory.edit_history.append(f"从 QA-{root_id} 创建基础问题")
             
             print(f"\n[BASE QA] {base_qa['question']}")
             
             ready_to_exit = False
             action_stats = defaultdict(int)
-            num_hops = 1  # 记录跳数
+            num_hops = 1
             
-            # Step 3: ⭐ 迭代优化循环（原版结构，在SELECT内部融合优化）
+            # Step 3: ⭐ 迭代优化循环
             for turn in range(self.max_turns):
                 print(f"\n{'--- 第 ' + str(turn+1) + ' 轮 ---'}")
                 
@@ -538,33 +504,28 @@ class OptimizedSemiconductorQAAgent:
                 
                 q_new = None
                 memory_new = copy.deepcopy(memory)
-                memory_new.edit_history.append(f"动作: {action['action']}. 说明: {action.get('note', '')}")
                 
-                # ============ 执行不同的Action ============
+                # ============ 执行Action ============
                 
                 if action['action'] == 'FUZZ':
-                    # ✅ 原版FUZZ逻辑
                     q_new = action['question']
-                    memory_new.edit_history.append(f"FUZZ操作: {q_new[:50]}...")
+                    memory_new.edit_history.append(f"FUZZ: {q_new[:50]}...")
                 
                 elif action['action'] == 'EXIT':
-                    # ✅ 原版EXIT逻辑
-                    print("[INFO] 问题生成完成，退出")
+                    print("[INFO] 退出")
                     break
                 
                 elif action['action'] == 'none':
-                    # ✅ 原版初始化逻辑
                     assert turn == 0
                     q_new = base_qa['question']
                 
                 elif action['action'] == 'SELECT':
-                    # ⭐⭐⭐ 这里是核心优化点 ⭐⭐⭐
-                    # 原版SELECT逻辑 + 筛选 + 答案重生成
+                    # ⭐⭐⭐ 核心优化点 ⭐⭐⭐
                     
                     if self.debug_mode:
-                        print(f"  [SELECT] ========== 开始SELECT流程 ==========")
+                        print(f"  [SELECT] ===== 开始SELECT流程 =====")
                     
-                    # (1) 找到目标实体（原版逻辑）
+                    # (1) 找目标实体
                     target = None
                     for e in memory.relevant:
                         if e.id == action['target'] or e.url == action['target']:
@@ -572,10 +533,10 @@ class OptimizedSemiconductorQAAgent:
                             break
                     
                     if target is None:
-                        print(f"[WARNING] 未找到目标 {action['target']}")
+                        print(f"[WARNING] 未找到目标")
                         continue
                     
-                    # (2) 找邻居（原版逻辑，带动态规划）
+                    # (2) 找邻居
                     if self.use_dynamic_planning:
                         candidates = self.kb.find_related_qas_prioritized(target.id, top_k=10)
                     else:
@@ -585,27 +546,26 @@ class OptimizedSemiconductorQAAgent:
                     candidates = [c for c in candidates if c not in exist_ids]
                     
                     if not candidates:
-                        print(f"[WARNING] QA-{target.id} 没有可用的相关QA")
+                        print(f"[WARNING] 无可用邻居")
                         continue
                     
                     neighbor_id = random.choice(candidates)
-                    print(f"  [SELECT] {target.id} -> {neighbor_id}")
+                    print(f"  [SELECT] {target.id} → {neighbor_id}")
                     
-                    # 更新使用统计
                     self.kb.update_usage([neighbor_id])
                     
                     neighbor_data = self.kb.get_qa(neighbor_id)
                     neighbor_entity = SemiconductorQAEntity(neighbor_id, neighbor_data, self.kb)
                     neighbor_entity = await self.extract_qa_info(neighbor_entity)
                     
-                    # (3) 构建关联QA（原版逻辑）
+                    # (3) 构建link_qa
                     try:
                         link_qa = await self.construct_link_qa(target, neighbor_entity)
                     except Exception as e:
-                        print(f"[WARNING] 构建关联QA失败: {e}")
+                        print(f"[WARNING] 构建link_qa失败: {e}")
                         continue
                     
-                    # (4) 检查重复（原版逻辑）
+                    # (4) 检查重复
                     try:
                         duplicate = await self.check_info_cover(
                             link_qa['statement'],
@@ -616,72 +576,68 @@ class OptimizedSemiconductorQAAgent:
                         continue
                     
                     if duplicate:
-                        print("[WARNING] 陈述重复，跳过")
+                        print("[WARNING] 陈述重复")
                         continue
                     
-                    # (5) 组合QA（原版逻辑，生成参考答案）
-                    try:
-                        combine_qa_result = await self.combine_qa(memory.qa, link_qa, memory)
-                        q_new = combine_qa_result['question']
-                        reference_answer = combine_qa_result['answer']  # 这是参考答案
-                    except Exception as e:
-                        print(f"[WARNING] 组合QA失败: {e}")
+                    # (5) ⭐ 关键：添加新子QA，用所有子QA生成多跳问题
+                    memory_new.relevant.append(neighbor_entity)
+                    memory_new.statements.append(link_qa['statement'])
+                    
+                    multihop_result = await self.generate_multihop_question(
+                        memory_new.relevant,
+                        memory_new.statements
+                    )
+                    
+                    if multihop_result is None:
+                        print(f"[WARNING] 多跳生成失败")
                         continue
                     
-                    # (6) 🔧 优化：立即筛选问题
+                    q_new = multihop_result['question']
+                    reference_answer = multihop_result['answer']
+                    reasoning_steps = multihop_result.get('reasoning_steps', [])
+                    
+                    # (6) 筛选
                     if self.enable_qa_filtering:
-                        memory_new.relevant.append(neighbor_entity)  # 临时添加，用于评估
-                        
-                        eval_result = await self.evaluate_question_inline(
-                            q_new,
-                            memory_new.relevant
-                        )
+                        eval_result = await self.evaluate_question(q_new, memory_new.relevant)
                         
                         if not eval_result['passed']:
-                            print(f"  [SELECT] ✗ 问题未通过筛选，跳过此轮")
-                            memory_new.relevant.pop()  # 移除临时添加的
+                            print(f"  [SELECT] ✗ 未通过筛选")
+                            memory_new.relevant.pop()
+                            memory_new.statements.pop()
                             continue
                         
-                        print(f"  [SELECT] ✓ 问题通过筛选")
-                    else:
-                        memory_new.relevant.append(neighbor_entity)
+                        print(f"  [SELECT] ✓ 通过筛选")
                     
-                    # (7) 🔧 优化：立即重生成答案（参考答案 → 最终答案）
+                    # (7) 答案重生成
                     if self.enable_answer_regeneration:
-                        memory_new.statements.append(link_qa['statement'])  # 临时添加
-                        
-                        regen_result = await self.regenerate_answer_inline(
+                        regen_result = await self.regenerate_answer(
                             q_new,
                             reference_answer,
                             memory_new.relevant,
-                            memory_new.statements
+                            reasoning_steps
                         )
                         
-                        # 检查答案是否基于子QA
                         grounded_check = regen_result.get('grounded_check', {})
                         if grounded_check.get('all_info_from_subqa', False) and regen_result.get('confidence', 0) >= 0.6:
                             final_answer = regen_result['final_answer']
-                            print(f"  [SELECT] ✓ 使用重生成答案（置信度: {regen_result['confidence']:.2f}）")
+                            print(f"  [SELECT] ✓ 使用重生成答案")
                         else:
                             final_answer = reference_answer
-                            print(f"  [SELECT] ⚠ 使用参考答案（置信度低或未基于子QA）")
+                            print(f"  [SELECT] ⚠ 使用参考答案")
                     else:
                         final_answer = reference_answer
-                        memory_new.statements.append(link_qa['statement'])
                     
-                    # (8) 更新memory（使用最终答案）
-                    memory_new.qa['answer'] = final_answer  # ⭐ 关键：用重生成的最终答案
-                    memory_new.edit_history.append(f"SELECT: '{target.name}' → '{neighbor_entity.name}'")
-                    memory_new.edit_history.append(f"组合问题: {q_new[:80]}...")
-                    memory_new.edit_history.append(f"最终答案: {final_answer[:80]}...")
+                    # (8) 更新memory
+                    memory_new.qa['answer'] = final_answer
+                    memory_new.edit_history.append(f"SELECT: {target.id} → {neighbor_id}")
                     
-                    num_hops += 1  # 记录跳数
+                    num_hops += 1
                     
                     if self.debug_mode:
                         print(f"  [SELECT] 当前跳数: {num_hops}")
-                        print(f"  [SELECT] ========== SELECT流程完成 ==========")
+                        print(f"  [SELECT] ===== SELECT完成 =====")
                 
-                # ============ 验证和测试（原版逻辑）============
+                # ============ 验证和测试 ============
                 
                 if q_new is None:
                     continue
@@ -689,30 +645,28 @@ class OptimizedSemiconductorQAAgent:
                 print(f"\n[NEW Q] {q_new}\n")
                 memory_new.qa['question'] = q_new
                 
-                # 验证有效性
+                # 验证
                 try:
                     valid = await self.check_qa_valid(memory_new.repr())
                 except Exception as e:
-                    print(f"[WARNING] 验证有效性失败: {e}")
+                    print(f"[WARNING] 验证失败: {e}")
                     valid = False
                 
                 if not valid:
-                    print(f"[WARNING] 第{turn+1}轮QA无效")
+                    print(f"[WARNING] 第{turn+1}轮无效")
                     continue
                 
-                # 直接生成测试
+                # 测试
                 try:
                     answers = await self.direct_generate(q_new, n=4)
                 except Exception as e:
-                    print(f"[WARNING] 直接生成失败: {e}")
+                    print(f"[WARNING] 生成失败: {e}")
                     continue
                 
                 try:
-                    corrects = await self.llm_judge_answer(
-                        q_new, answers, memory_new.qa['answer']
-                    )
+                    corrects = await self.llm_judge_answer(q_new, answers, memory_new.qa['answer'])
                 except Exception as e:
-                    print(f"[WARNING] LLM判断失败: {e}")
+                    print(f"[WARNING] 判断失败: {e}")
                     continue
                 
                 correct_count = sum(corrects)
@@ -721,11 +675,11 @@ class OptimizedSemiconductorQAAgent:
                 if correct_count >= 2:
                     memory = memory_new
                     ready_to_exit = True
-                    print("[INFO] 测试通过，可以选择退出")
+                    print("[INFO] 测试通过")
                 else:
-                    print("[INFO] 测试未通过，继续迭代")
+                    print("[INFO] 测试未通过")
             
-            # Step 4: 保存结果
+            # Step 4: 保存
             output = {
                 'uid': memory.uid,
                 'question': memory.qa['question'],
@@ -741,15 +695,14 @@ class OptimizedSemiconductorQAAgent:
                 'answer_regeneration_enabled': self.enable_answer_regeneration
             }
             
-            # 保存
             import os
             os.makedirs(save_path, exist_ok=True)
             output_file = os.path.join(save_path, f"{memory.uid}.json")
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(output, f, ensure_ascii=False, indent=2)
             
-            print(f"\n[DONE] QA已保存: {output_file}")
-            print(f"       最终问题: {memory.qa['question'][:80]}...")
+            print(f"\n[DONE] 已保存: {output_file}")
+            print(f"       问题: {memory.qa['question'][:80]}...")
             print(f"       跳数: {num_hops}")
             print(f"       答案长度: {len(memory.qa['answer'])} 字符")
             
