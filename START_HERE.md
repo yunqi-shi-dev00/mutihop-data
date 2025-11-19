@@ -13,9 +13,10 @@ utils.py               - 工具函数
 requirements.txt       - 依赖包
 ```
 
-### 📖 文档（7个）
+### 📖 文档（8个）
 ```
 快速运行.md            - 🚀 运行命令（从这里开始！）
+vLLM使用说明.md        - 💡 vLLM本地大模型使用
 运行命令.md            - 📋 完整参数说明
 最终_readme.md         - 📘 完整使用指南
 功能说明.md            - 📗 详细功能机制
@@ -38,7 +39,15 @@ semiconductor_qa_agent.py  - 原版代码（对比参考）
 pip install -r requirements.txt
 ```
 
-### 2️⃣ 最简单的运行命令
+### 2️⃣ 启动 vLLM 服务
+```bash
+python -m vllm.entrypoints.openai.api_server \
+    --model /你的本地模型路径 \
+    --host 0.0.0.0 \
+    --port 8000
+```
+
+### 3️⃣ 最简单的运行命令
 ```bash
 python main_final.py \
     --input 你的数据.jsonl \
@@ -47,7 +56,7 @@ python main_final.py \
     --tokenizer_path /分词器路径
 ```
 
-### 3️⃣ 完整功能命令（推荐）
+### 4️⃣ 完整功能命令（推荐）
 ```bash
 python main_final.py \
     --input 你的数据.jsonl \
@@ -64,7 +73,7 @@ python main_final.py \
     --debug
 ```
 
-### 4️⃣ 查看帮助
+### 5️⃣ 查看帮助
 ```bash
 python main_final.py --help
 ```
