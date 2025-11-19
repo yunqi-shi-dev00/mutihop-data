@@ -13,9 +13,11 @@ utils.py               - 工具函数
 requirements.txt       - 依赖包
 ```
 
-### 📖 文档（5个）
+### 📖 文档（7个）
 ```
-最终_readme.md         - 📘 完整使用指南（从这里开始）
+快速运行.md            - 🚀 运行命令（从这里开始！）
+运行命令.md            - 📋 完整参数说明
+最终_readme.md         - 📘 完整使用指南
 功能说明.md            - 📗 详细功能机制
 功能对比总结.md        - 📙 原版vs最终版对比
 检查清单.md            - 📕 修复清单和测试建议
@@ -36,23 +38,19 @@ semiconductor_qa_agent.py  - 原版代码（对比参考）
 pip install -r requirements.txt
 ```
 
-### 2️⃣ 运行测试
+### 2️⃣ 最简单的运行命令
 ```bash
 python main_final.py \
-    --input /path/to/QA.jsonl \
-    --output ./test_output \
-    --model_path /path/to/model \
-    --tokenizer_path /path/to/tokenizer \
-    --batch_size 2 \
-    --target_count 10 \
-    --max_hops 3 \
-    --debug
+    --input 你的数据.jsonl \
+    --output ./生成结果 \
+    --model_path /模型路径 \
+    --tokenizer_path /分词器路径
 ```
 
-### 3️⃣ 生产运行
+### 3️⃣ 完整功能命令（推荐）
 ```bash
 python main_final.py \
-    --input /path/to/QA.jsonl \
+    --input 你的数据.jsonl \
     --output ./generated_qa \
     --model_path /path/to/model \
     --tokenizer_path /path/to/tokenizer \
@@ -65,6 +63,13 @@ python main_final.py \
     --enable_answer_regeneration \
     --debug
 ```
+
+### 4️⃣ 查看帮助
+```bash
+python main_final.py --help
+```
+
+**📖 详细运行说明请看 → `快速运行.md` 或 `运行命令.md`**
 
 ---
 
@@ -84,22 +89,26 @@ python main_final.py \
 
 ## 📚 文档导航
 
-### 想了解如何使用？
+### 🚀 想知道怎么运行？
+👉 阅读 **`快速运行.md`** ⭐ 最重要！
+👉 阅读 **`运行命令.md`** （完整参数说明）
+
+### 📘 想了解如何使用？
 👉 阅读 **`最终_readme.md`**
 
-### 想了解详细功能？
+### 📗 想了解详细功能？
 👉 阅读 **`功能说明.md`**
 - 最多组合几个问题？
 - 动态规划如何工作？
 - 消耗统计如何追踪？
 
-### 想了解原版vs最终版区别？
+### 📙 想了解原版vs最终版区别？
 👉 阅读 **`功能对比总结.md`**
 
-### 想了解修复了哪些问题？
+### 📕 想了解修复了哪些问题？
 👉 阅读 **`检查清单.md`**
 
-### 想了解文件用途？
+### 📓 想了解文件用途？
 👉 阅读 **`文件清单.md`**
 
 ---
