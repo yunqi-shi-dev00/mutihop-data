@@ -62,6 +62,8 @@ def parse_args():
                         help='目标生成数量')
     parser.add_argument('--max_turns', type=int, default=16,
                         help='最大迭代轮数')
+    parser.add_argument('--max_hops', type=int, default=3,
+                        help='最多组合的问题数量（默认3）')
     
     # 功能开关
     parser.add_argument('--enable_dynamic_planning', action='store_true',
@@ -159,6 +161,7 @@ async def main():
                 llm_client=llm_client,
                 tokenizer_path=args.tokenizer_path,
                 max_turns=args.max_turns,
+                max_hops=args.max_hops,
                 use_dynamic_planning=args.enable_dynamic_planning,
                 enable_qa_filtering=args.enable_qa_filtering,
                 enable_answer_regeneration=args.enable_answer_regeneration,

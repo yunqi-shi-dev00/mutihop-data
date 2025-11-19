@@ -35,6 +35,7 @@ class FinalSemiconductorQAAgent:
                  llm_client: LLMAPIClient, 
                  tokenizer_path: str,
                  max_turns: int = 16,
+                 max_hops: int = 3,  # ⭐ 新增：最多组合3个问题
                  use_dynamic_planning: bool = True,
                  enable_qa_filtering: bool = True,
                  enable_answer_regeneration: bool = True,
@@ -42,6 +43,7 @@ class FinalSemiconductorQAAgent:
         self.kb = knowledge_base
         self.llm_client = llm_client
         self.max_turns = max_turns
+        self.max_hops = max_hops  # 最多组合的问题数量
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
         
         # 动态规划
@@ -64,6 +66,9 @@ class FinalSemiconductorQAAgent:
             print(f"[Agent] ✓ 启用答案重生成（在SELECT后执行，强调围绕子QA）")
         if debug_mode:
             print(f"[Agent] ✓ 启用调试模式")
+        
+        # 输出关键配置
+        print(f"[Agent] 最大迭代轮数: {self.max_turns}, 最多组合问题数: {self.max_hops}")
     
     # ============ 阶段管理 ============
     
@@ -528,8 +533,13 @@ class FinalSemiconductorQAAgent:
                 elif action['action'] == 'SELECT':
                     # ⭐⭐⭐ 核心优化点 ⭐⭐⭐
                     
+                    # ⚠️ 检查是否已达到最大跳数限制
+                    if num_hops >= self.max_hops:
+                        print(f"[INFO] 已达到最大跳数限制 ({self.max_hops})，跳过SELECT")
+                        continue
+                    
                     if self.debug_mode:
-                        print(f"  [SELECT] ===== 开始SELECT流程 =====")
+                        print(f"  [SELECT] ===== 开始SELECT流程 (当前{num_hops}跳，最多{self.max_hops}跳) =====")
                     
                     # (1) 找目标实体
                     target = None
@@ -706,8 +716,10 @@ class FinalSemiconductorQAAgent:
                 'action_stats': dict(action_stats),
                 'num_turns': turn + 1,
                 'num_hops': num_hops,
+                'max_hops': self.max_hops,
                 'qa_filtering_enabled': self.enable_qa_filtering,
-                'answer_regeneration_enabled': self.enable_answer_regeneration
+                'answer_regeneration_enabled': self.enable_answer_regeneration,
+                'dynamic_planning_enabled': self.use_dynamic_planning
             }
             
             import os
