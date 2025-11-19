@@ -210,6 +210,12 @@ class FinalSemiconductorQAAgent:
         """
         num_hops = len(all_sub_qas)
         
+        # ⚠️ 安全检查：至少需要2个子QA才能生成多跳问题
+        if num_hops < 2:
+            if self.debug_mode:
+                print(f"    [多跳组合] 错误：子QA数量不足（需要>=2，实际{num_hops}）")
+            return None
+        
         if self.debug_mode:
             print(f"    [多跳组合] 基于{num_hops}个子QA生成{num_hops}跳问题")
         
@@ -583,6 +589,13 @@ class FinalSemiconductorQAAgent:
                     memory_new.relevant.append(neighbor_entity)
                     memory_new.statements.append(link_qa['statement'])
                     
+                    # ⚠️ 确保至少有2个子QA
+                    if len(memory_new.relevant) < 2:
+                        print(f"[WARNING] 子QA数量不足（{len(memory_new.relevant)}），跳过")
+                        memory_new.relevant.pop()
+                        memory_new.statements.pop()
+                        continue
+                    
                     multihop_result = await self.generate_multihop_question(
                         memory_new.relevant,
                         memory_new.statements
@@ -590,6 +603,8 @@ class FinalSemiconductorQAAgent:
                     
                     if multihop_result is None:
                         print(f"[WARNING] 多跳生成失败")
+                        memory_new.relevant.pop()
+                        memory_new.statements.pop()
                         continue
                     
                     q_new = multihop_result['question']
@@ -601,7 +616,7 @@ class FinalSemiconductorQAAgent:
                         eval_result = await self.evaluate_question(q_new, memory_new.relevant)
                         
                         if not eval_result['passed']:
-                            print(f"  [SELECT] ✗ 未通过筛选")
+                            print(f"  [SELECT] ✗ 未通过筛选：{eval_result['reason']}")
                             memory_new.relevant.pop()
                             memory_new.statements.pop()
                             continue
