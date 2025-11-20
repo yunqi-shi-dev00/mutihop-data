@@ -1,7 +1,7 @@
 """
 半导体QA生成系统 - 知识库模块（优化版）
 包含增强的知识库、QA实体类和Agent记忆类
-新增功能：语义embedding支持
+新增功能：语义embedding支持（使用本地模型）
 """
 
 import random
@@ -10,16 +10,16 @@ from typing import Dict, List, Any, Optional
 
 # 可选依赖：语义embedding
 try:
-    from sentence_transformers import SentenceTransformer
     import numpy as np
     from sklearn.metrics.pairwise import cosine_similarity
+    import torch
+    from transformers import AutoTokenizer, AutoModel
     EMBEDDING_AVAILABLE = True
-    print("[INFO] ✓ sentence-transformers已加载")
+    print("[INFO] ✓ Embedding依赖已加载（使用本地Qwen3-Embedding模型）")
 except ImportError as e:
     EMBEDDING_AVAILABLE = False
-    print(f"[WARNING] sentence-transformers导入失败: {e}")
+    print(f"[WARNING] Embedding依赖导入失败: {e}")
     print("[WARNING] 将使用关键词匹配模式")
-    print("[提示] 安装方式: pip install sentence-transformers scikit-learn")
 except Exception as e:
     EMBEDDING_AVAILABLE = False
     print(f"[ERROR] 加载embedding依赖时出错: {e}")
@@ -33,7 +33,7 @@ class EnhancedSemiconductorKB:
         """
         Args:
             qa_data: QA数据列表
-            use_embedding: 是否使用语义embedding查找相关QA（需要安装sentence-transformers）
+            use_embedding: 是否使用语义embedding查找相关QA（使用本地Qwen3-Embedding模型）
         """
         self.qa_data = {qa['id']: qa for qa in qa_data}
         self.qa_ids = list(self.qa_data.keys())
@@ -55,6 +55,7 @@ class EnhancedSemiconductorKB:
         # 🚀 新增：语义embedding系统
         self.use_embedding = use_embedding and EMBEDDING_AVAILABLE
         self.embedding_model = None
+        self.embedding_tokenizer = None
         self.qa_embeddings = None
         self.qa_id_to_idx = {}  # QA-ID到索引的映射
         
@@ -63,11 +64,11 @@ class EnhancedSemiconductorKB:
         
         # 构建embedding
         if self.use_embedding:
-            print("[KB] 🚀 启用语义embedding模式")
+            print("[KB] 🚀 启用语义embedding模式（本地Qwen3-Embedding模型）")
             self._build_embeddings()
         else:
             if use_embedding and not EMBEDDING_AVAILABLE:
-                print("[KB] ⚠️ 未安装sentence-transformers，使用关键词匹配模式")
+                print("[KB] ⚠️ 未安装embedding依赖，使用关键词匹配模式")
             else:
                 print("[KB] 使用关键词匹配模式")
         
@@ -97,11 +98,29 @@ class EnhancedSemiconductorKB:
             self.paper_quality_score[paper_name] = 1.0
     
     def _build_embeddings(self):
-        """🚀 构建QA的embedding向量"""
+        """🚀 构建QA的embedding向量（使用本地Qwen3-Embedding模型）"""
         try:
-            print("[KB] 加载embedding模型（all-MiniLM-L6-v2）...")
-            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            # 使用本地Qwen3-Embedding模型
+            local_model_path = "/mnt/data/LLM/hhh/qwen3_emb/backup_h/Qwen3-Embedding-0.6B_sft_v5"
             
+            print(f"[KB] 加载本地embedding模型: {local_model_path}")
+            
+            self.embedding_tokenizer = AutoTokenizer.from_pretrained(
+                local_model_path, 
+                trust_remote_code=True
+            )
+            self.embedding_model = AutoModel.from_pretrained(
+                local_model_path, 
+                trust_remote_code=True
+            )
+            self.embedding_model.eval()
+            
+            # 检测设备
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.embedding_model = self.embedding_model.to(device)
+            print(f"[KB] 模型加载完成，使用设备: {device}")
+            
+            # 准备QA文本
             qa_texts = []
             qa_ids = []
             
@@ -111,23 +130,75 @@ class EnhancedSemiconductorKB:
                 qa_ids.append(qa_id)
             
             print(f"[KB] 生成 {len(qa_texts)} 个QA的embedding向量...")
-            self.qa_embeddings = self.embedding_model.encode(
-                qa_texts, 
-                show_progress_bar=True,
-                batch_size=32,
-                normalize_embeddings=True  # 归一化，加速余弦相似度计算
-            )
+            
+            # 批量生成embedding
+            embeddings_list = []
+            batch_size = 8  # 根据GPU内存调整
+            
+            with torch.no_grad():
+                for i in range(0, len(qa_texts), batch_size):
+                    batch_texts = qa_texts[i:i+batch_size]
+                    
+                    # Tokenize
+                    inputs = self.embedding_tokenizer(
+                        batch_texts, 
+                        padding=True, 
+                        truncation=True, 
+                        max_length=512,
+                        return_tensors="pt"
+                    ).to(device)
+                    
+                    # 获取embedding
+                    outputs = self.embedding_model(**inputs)
+                    
+                    # Mean pooling
+                    attention_mask = inputs['attention_mask']
+                    token_embeddings = outputs.last_hidden_state
+                    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+                    sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+                    sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+                    batch_embeddings = (sum_embeddings / sum_mask).cpu().numpy()
+                    
+                    embeddings_list.append(batch_embeddings)
+                    
+                    # 显示进度
+                    progress = min(i + batch_size, len(qa_texts))
+                    print(f"   进度: {progress}/{len(qa_texts)}", end='\r')
+            
+            print()  # 换行
+            
+            # 合并所有batch
+            self.qa_embeddings = np.vstack(embeddings_list)
+            
+            # 归一化（用于余弦相似度计算）
+            norms = np.linalg.norm(self.qa_embeddings, axis=1, keepdims=True)
+            self.qa_embeddings = self.qa_embeddings / norms
             
             # 建立ID到索引的映射
             for idx, qa_id in enumerate(qa_ids):
                 self.qa_id_to_idx[qa_id] = idx
             
             print(f"[KB] ✓ Embedding构建完成（维度: {self.qa_embeddings.shape[1]}）")
+            
+            # 清理模型释放内存
+            del self.embedding_model
+            del self.embedding_tokenizer
+            self.embedding_model = None
+            self.embedding_tokenizer = None
+            
+            if device == "cuda":
+                torch.cuda.empty_cache()
+            
+            print(f"[KB] ✓ 模型已卸载，内存已释放")
+            
         except Exception as e:
             print(f"[KB] ✗ Embedding构建失败: {e}")
+            import traceback
+            traceback.print_exc()
             print(f"[KB] 回退到关键词匹配模式")
             self.use_embedding = False
             self.embedding_model = None
+            self.embedding_tokenizer = None
             self.qa_embeddings = None
     
     def _extract_concepts_simple(self, text: str) -> List[str]:
@@ -397,7 +468,7 @@ class EnhancedSemiconductorKB:
 
 
 class SemiconductorQAEntity:
-    """半导体QA实体（原版完整保留）"""
+    """半导体QA实体（原版完整保留 + 修复key_concepts字典问题）"""
     
     def __init__(self, qa_id: str, qa_data: Dict, kb: EnhancedSemiconductorKB):
         self.id = qa_id
@@ -416,16 +487,17 @@ class SemiconductorQAEntity:
         return self.id
     
     def repr(self):
-        """生成实体的文本表示"""
-        # key_concepts现在是字符串列表
+        """生成实体的文本表示（⭐ 修复：兼容字典和字符串两种格式）"""
+        # ⭐⭐⭐ 修复 key_concepts 字典问题 ⭐⭐⭐
         if self.key_concepts:
-            # 如果是字符串列表
+            # 如果第一个元素是字符串（旧格式）
             if isinstance(self.key_concepts[0], str):
                 concepts_str = ', '.join(self.key_concepts)
-            # 如果是字典列表（兼容旧格式）
+            # 如果第一个元素是字典（新格式：{"name": "...", "type": "..."}）
             elif isinstance(self.key_concepts[0], dict):
                 concepts_str = ', '.join([c.get('name', str(c)) for c in self.key_concepts])
             else:
+                # 其他情况，转为字符串
                 concepts_str = ', '.join([str(c) for c in self.key_concepts])
         else:
             concepts_str = '待提取'
@@ -458,11 +530,17 @@ class SemiconductorQAEntity:
 """
     
     def dict(self):
-        # ⭐ 确保 key_concepts 是字符串列表（兼容新旧格式）
-        if self.key_concepts and isinstance(self.key_concepts[0], dict):
-            key_concepts_str = [c.get('name', str(c)) for c in self.key_concepts]
+        """导出为字典（⭐ 修复：确保 key_concepts 是字符串列表）"""
+        # ⭐⭐⭐ 修复：确保 key_concepts 是字符串列表 ⭐⭐⭐
+        if self.key_concepts and len(self.key_concepts) > 0:
+            # 如果是字典列表，提取name字段
+            if isinstance(self.key_concepts[0], dict):
+                key_concepts_str = [c.get('name', str(c)) for c in self.key_concepts]
+            else:
+                # 已经是字符串列表
+                key_concepts_str = self.key_concepts
         else:
-            key_concepts_str = self.key_concepts
+            key_concepts_str = []
         
         return {
             'id': self.id,
@@ -470,7 +548,7 @@ class SemiconductorQAEntity:
             'url': self.url,
             'qa_data': self.qa_data,
             'summary': self.summary,
-            'key_concepts': key_concepts_str,  # 使用转换后的字符串列表
+            'key_concepts': key_concepts_str,  # ⭐ 使用转换后的字符串列表
             'related_qas': self.related_qas
         }
 
