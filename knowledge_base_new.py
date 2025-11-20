@@ -14,9 +14,16 @@ try:
     import numpy as np
     from sklearn.metrics.pairwise import cosine_similarity
     EMBEDDING_AVAILABLE = True
-except ImportError:
+    print("[INFO] ✓ sentence-transformers已加载")
+except ImportError as e:
     EMBEDDING_AVAILABLE = False
-    print("[WARNING] sentence-transformers未安装，将使用关键词匹配")
+    print(f"[WARNING] sentence-transformers导入失败: {e}")
+    print("[WARNING] 将使用关键词匹配模式")
+    print("[提示] 安装方式: pip install sentence-transformers scikit-learn")
+except Exception as e:
+    EMBEDDING_AVAILABLE = False
+    print(f"[ERROR] 加载embedding依赖时出错: {e}")
+    print("[WARNING] 将使用关键词匹配模式")
 
 
 class EnhancedSemiconductorKB:
