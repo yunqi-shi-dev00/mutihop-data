@@ -786,8 +786,9 @@ class FinalSemiconductorQAAgent:
                         continue
                     
                     # (2) 找邻居
+                    # ⭐⭐⭐ 优化1：增加候选数量 10→30 ⭐⭐⭐
                     if self.use_dynamic_planning:
-                        candidates = self.kb.find_related_qas_prioritized(target.id, top_k=10, current_stage=self.current_stage)
+                        candidates = self.kb.find_related_qas_prioritized(target.id, top_k=30, current_stage=self.current_stage)
                     else:
                         candidates = target.related_qas
                     
@@ -798,8 +799,10 @@ class FinalSemiconductorQAAgent:
                         print(f"  [SELECT] ✗ 无可用邻居")
                         continue
                     
-                    neighbor_id = random.choice(candidates)
-                    print(f"  [SELECT] {target.id} → {neighbor_id}")
+                    # ⭐⭐⭐ 优化2：从前5个最相关候选中选（不是从所有候选中随机选）⭐⭐⭐
+                    top_candidates = candidates[:min(5, len(candidates))]
+                    neighbor_id = random.choice(top_candidates)
+                    print(f"  [SELECT] {target.id} → {neighbor_id} (从前{len(top_candidates)}个候选中选择)")
                     
                     self.kb.update_usage([neighbor_id])
                     
