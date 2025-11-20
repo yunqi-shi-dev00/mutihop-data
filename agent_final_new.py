@@ -17,7 +17,7 @@ from collections import defaultdict
 from typing import Dict, List, Any, Optional
 from transformers import AutoTokenizer
 
-from prompts_final import SemiconductorQAPrompts
+from prompts_final_new import SemiconductorQAPrompts
 from knowledge_base import EnhancedSemiconductorKB, SemiconductorQAEntity, AgentMemory
 from llm_client import LLMAPIClient
 
@@ -230,10 +230,19 @@ class FinalSemiconductorQAAgent:
             concepts_result = self._safe_json_parse(text, debug_prefix="提取关键概念")
             
             if concepts_result:
-                if isinstance(concepts_result, list):
-                    entity.key_concepts = [item['concept'] for item in concepts_result if 'concept' in item]
-                elif isinstance(concepts_result, dict) and 'concepts' in concepts_result:
-                    entity.key_concepts = concepts_result['concepts']
+                # 新格式：{"concepts": [{"name": "...", "type": "...", "importance": "..."}]}
+                if isinstance(concepts_result, dict) and 'concepts' in concepts_result:
+                    entity.key_concepts = [
+                        item['name'] for item in concepts_result['concepts'] 
+                        if isinstance(item, dict) and 'name' in item
+                    ]
+                # 兼容旧格式：[{"concept": "...", "type": "..."}]
+                elif isinstance(concepts_result, list):
+                    entity.key_concepts = [
+                        item.get('concept', item.get('name', '')) 
+                        for item in concepts_result 
+                        if isinstance(item, dict)
+                    ]
                 else:
                     entity.key_concepts = []
             else:
