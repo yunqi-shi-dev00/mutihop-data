@@ -125,10 +125,15 @@ class EnhancedSemiconductorKB:
             )
             self.embedding_model.eval()
             
-            # 检测设备
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            # ========================================
+            # 🔧 修复：GPU内存不足时使用CPU
+            # 问题：GPU被vLLM占满，无法加载embedding模型
+            # 解决：强制使用CPU（embedding只用一次，速度可接受）
+            # ========================================
+            # 检测设备（强制使用CPU避免OOM）
+            device = "cpu"  # ⭐ 强制CPU，避免GPU OOM
             self.embedding_model = self.embedding_model.to(device)
-            print(f"[KB] 模型加载完成，使用设备: {device}")
+            print(f"[KB] 模型加载完成，使用设备: {device}（避免GPU OOM）")
             
             # 准备QA文本
             qa_texts = []
