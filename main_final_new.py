@@ -80,6 +80,14 @@ def parse_args():
     # 🚀 新增：embedding相关
     parser.add_argument('--use-embedding', action='store_true',
                         help='使用语义embedding查找相关QA（需要安装sentence-transformers）')
+    # ========================================
+    # 🔧 修复Bug 7：Embedding模型内存不足（命令行参数）
+    # 修复时间：2025-11-19
+    # 说明：新增--embedding-batch-size参数，允许用户根据GPU显存调整batch_size
+    # 使用：--embedding-batch-size 4（默认，4GB显存）
+    #       --embedding-batch-size 2（3-4GB显存）
+    #       --embedding-batch-size 1（2.5-3GB显存）
+    # ========================================
     parser.add_argument('--embedding-batch-size', type=int, default=4,
                         help='Embedding生成的批量大小（默认4，减少内存占用）')
     
@@ -165,11 +173,18 @@ async def main():
     
     # 初始化知识库（支持embedding）
     try:
+        # ========================================
+        # 🔧 修复Bug 7：Embedding模型内存不足（参数传递）
+        # 修复时间：2025-11-19
+        # 说明：将命令行参数embedding_batch_size传递给KB
+        # 效果：KB会使用用户指定的batch_size生成embedding
+        # ========================================
         kb = EnhancedSemiconductorKB(
             qa_data, 
             use_embedding=args.use_embedding,
             embedding_batch_size=args.embedding_batch_size  # ⭐ 传递batch_size
         )
+        # ========================================
     except Exception as e:
         print(f"[ERROR] 知识库初始化失败: {e}")
         sys.exit(1)

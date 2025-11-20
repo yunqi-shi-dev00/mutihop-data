@@ -562,18 +562,27 @@ class FinalSemiconductorQAAgent:
     
     async def choose_action(self, state: str, ready_to_exit: bool = False, memory: AgentMemory = None) -> Dict:
         """选择下一步操作（优化版：使用安全JSON解析）"""
+        # ========================================
+        # 🔧 修复Bug 1：LLM编造不存在的target ID（提取可选ID）
+        # 🔧 修复Bug 3：ID类型错误（join需要字符串）
+        # 修复时间：2025-11-19
+        # 问题1：LLM不知道可选ID范围，编造了不存在的ID
+        # 问题2：e.id可能是int，join需要str
+        # 解决：提取memory.relevant中的ID，转为字符串，传递给SELECT prompt
+        # ========================================
         # ⭐⭐⭐ 修复：提取可选ID列表 ⭐⭐⭐
         available_ids = ""
         if memory and memory.relevant:
-            ids = [str(e.id) for e in memory.relevant]  # ⭐ 转为字符串
-            available_ids = ", ".join(ids)
+            ids = [str(e.id) for e in memory.relevant]  # ⭐ Bug 3修复：转为字符串
+            available_ids = ", ".join(ids)  # "47, 63, 128"
         else:
             available_ids = "无"
         
         actions = [
             SemiconductorQAPrompts.FUZZ,
-            SemiconductorQAPrompts.SELECT.format(available_ids=available_ids),  # ⭐ 传递可选ID
+            SemiconductorQAPrompts.SELECT.format(available_ids=available_ids),  # ⭐ Bug 1修复：传递ID列表
         ]
+        # ========================================
         random.shuffle(actions)
         
         if ready_to_exit:
@@ -746,8 +755,14 @@ class FinalSemiconductorQAAgent:
                     action = {'action': 'none'}
                 else:
                     try:
+                        # ========================================
+                        # 🔧 修复Bug 1：LLM编造不存在的target ID（传递memory）
+                        # 修复时间：2025-11-19
+                        # 说明：调用choose_action时传递memory，让其提取可选ID
+                        # ========================================
                         # ⭐⭐⭐ 修复：传递memory参数，让LLM知道可选ID ⭐⭐⭐
                         action = await self.choose_action(state, ready_to_exit, memory=memory)
+                        # ========================================
                     except Exception as e:
                         print(f"[WARNING] 选择动作失败: {e}")
                         continue
@@ -783,24 +798,39 @@ class FinalSemiconductorQAAgent:
                     if self.debug_mode:
                         print(f"  [SELECT] ===== 开始SELECT流程 (当前{num_hops}跳，最多{self.max_hops}跳) =====")
                     
+                    # ========================================
+                    # 🔧 修复Bug 4：ID类型不匹配（查找错误）
+                    # 修复时间：2025-11-19
+                    # 问题：e.id可能是int(47)，action['target']可能是str("47")
+                    #       47 == "47" → False（类型不同）
+                    # 解决：统一转为字符串比较
+                    # ========================================
                     # (1) 找目标实体
                     # ⭐⭐⭐ 修复：如果LLM编造了错误的ID，随机选一个有效的 ⭐⭐⭐
                     target = None
                     for e in memory.relevant:
-                        # ⭐ 修复：统一转为字符串比较，避免类型不匹配
+                        # ⭐ Bug 4修复：统一转为字符串比较，避免类型不匹配
                         if str(e.id) == str(action['target']) or str(e.url) == str(action['target']):
                             target = e
                             break
+                    # ========================================
                     
+                    # ========================================
+                    # 🔧 修复Bug 2：容错机制缺失
+                    # 修复时间：2025-11-19
+                    # 问题：即使LLM偶尔编造错误ID，也应该继续执行
+                    # 解决：如果找不到target，随机选一个有效的ID
+                    # ========================================
                     if target is None:
                         if memory.relevant:
-                            # ⭐ 修复：LLM编造了错误ID，随机选一个有效的
+                            # ⭐ Bug 2修复：LLM编造了错误ID，随机选一个有效的
                             target = random.choice(memory.relevant)
                             if self.debug_mode:
                                 print(f"  [SELECT] ⚠️ 目标ID '{action['target']}' 不存在，随机选择 {target.id}")
                         else:
                             print(f"  [SELECT] ✗ memory.relevant为空")
                             continue
+                    # ========================================
                     
                     # (2) 找邻居
                     # ⭐⭐⭐ 优化1：增加候选数量 10→30 ⭐⭐⭐
