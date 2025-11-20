@@ -560,11 +560,19 @@ class FinalSemiconductorQAAgent:
     
     # ============ Action选择 ============
     
-    async def choose_action(self, state: str, ready_to_exit: bool = False) -> Dict:
+    async def choose_action(self, state: str, ready_to_exit: bool = False, memory: AgentMemory = None) -> Dict:
         """选择下一步操作（优化版：使用安全JSON解析）"""
+        # ⭐⭐⭐ 修复：提取可选ID列表 ⭐⭐⭐
+        available_ids = ""
+        if memory and memory.relevant:
+            ids = [e.id for e in memory.relevant]
+            available_ids = ", ".join(ids)
+        else:
+            available_ids = "无"
+        
         actions = [
             SemiconductorQAPrompts.FUZZ,
-            SemiconductorQAPrompts.SELECT,
+            SemiconductorQAPrompts.SELECT.format(available_ids=available_ids),  # ⭐ 传递可选ID
         ]
         random.shuffle(actions)
         
@@ -738,7 +746,8 @@ class FinalSemiconductorQAAgent:
                     action = {'action': 'none'}
                 else:
                     try:
-                        action = await self.choose_action(state, ready_to_exit)
+                        # ⭐⭐⭐ 修复：传递memory参数，让LLM知道可选ID ⭐⭐⭐
+                        action = await self.choose_action(state, ready_to_exit, memory=memory)
                     except Exception as e:
                         print(f"[WARNING] 选择动作失败: {e}")
                         continue
@@ -775,6 +784,7 @@ class FinalSemiconductorQAAgent:
                         print(f"  [SELECT] ===== 开始SELECT流程 (当前{num_hops}跳，最多{self.max_hops}跳) =====")
                     
                     # (1) 找目标实体
+                    # ⭐⭐⭐ 修复：如果LLM编造了错误的ID，随机选一个有效的 ⭐⭐⭐
                     target = None
                     for e in memory.relevant:
                         if e.id == action['target'] or e.url == action['target']:
@@ -782,8 +792,14 @@ class FinalSemiconductorQAAgent:
                             break
                     
                     if target is None:
-                        print(f"  [SELECT] ✗ 未找到目标实体")
-                        continue
+                        if memory.relevant:
+                            # ⭐ 修复：LLM编造了错误ID，随机选一个有效的
+                            target = random.choice(memory.relevant)
+                            if self.debug_mode:
+                                print(f"  [SELECT] ⚠️ 目标ID '{action['target']}' 不存在，随机选择 {target.id}")
+                        else:
+                            print(f"  [SELECT] ✗ memory.relevant为空")
+                            continue
                     
                     # (2) 找邻居
                     # ⭐⭐⭐ 优化1：增加候选数量 10→30 ⭐⭐⭐
