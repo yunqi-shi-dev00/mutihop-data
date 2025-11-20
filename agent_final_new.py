@@ -1047,12 +1047,14 @@ class FinalSemiconductorQAAgent:
             
             # Step 4: 保存
             # ========================================
-            # 🔧 修复Bug：num_hops计数错误
+            # 🔧 修复Bug 8：num_hops计数问题（修正版）
             # 修复时间：2025-11-19
-            # 问题：num_hops是累积值，但source_qa_ids是最终的实体列表，两者不一致
-            # 解决：num_hops应该等于最终memory.relevant的长度
+            # 问题：之前num_hops是累积值，与source_qa_ids不一致
+            # 解决：
+            #   - num_hops：保持原逻辑（执行成功的SELECT次数+1），反映尝试的跳数
+            #   - final_qa_count：新增字段，等于len(source_qa_ids)，反映最终的源QA数量
             # ========================================
-            final_num_hops = len(memory.relevant)  # ⭐ 使用最终的实体数量
+            final_qa_count = len(memory.relevant)  # ⭐ 最终成功的源QA数量
             # ========================================
             
             output = {
@@ -1065,8 +1067,8 @@ class FinalSemiconductorQAAgent:
                 'edit_history': memory.edit_history,
                 'action_stats': dict(action_stats),
                 'num_turns': turn + 1,
-                'num_hops': final_num_hops,  # ⭐ 修复：使用最终数量
-                'num_hops_attempted': num_hops,  # 🆕 新增：记录尝试的跳数
+                'num_hops': num_hops,  # ⭐ 保持原逻辑：执行的SELECT次数+1
+                'final_qa_count': final_qa_count,  # 🆕 新增：最终的源QA数量
                 'max_hops': self.max_hops,
                 'qa_filtering_enabled': self.enable_qa_filtering,
                 'answer_regeneration_enabled': self.enable_answer_regeneration,
@@ -1082,7 +1084,7 @@ class FinalSemiconductorQAAgent:
             
             print(f"\n[DONE] 已保存: {output_file}")
             print(f"       问题: {memory.qa['question'][:80]}...")
-            print(f"       跳数: {final_num_hops} (尝试: {num_hops})")  # ⭐ 显示最终跳数和尝试次数
+            print(f"       跳数: {num_hops} (最终源QA: {final_qa_count}个)")  # ⭐ 显示尝试跳数和最终源QA数
             print(f"       答案长度: {len(memory.qa['answer'])} 字符")
             
             return output
