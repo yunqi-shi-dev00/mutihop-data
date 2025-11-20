@@ -614,7 +614,22 @@ class AgentMemory:
         self.uid = None
     
     def repr(self):
+        # ========================================
+        # 🔧 优化：显示更多相关QA（不只是已组合的）
+        # 问题：原来只显示已组合的QA（1个），LLM在choose_action时看不到其他候选
+        # 解决：同时显示已组合的QA + 它们的相关QA（候选）
+        # ========================================
         relevant = '\n'.join([f'- [{e.name}] (ID: {e.id})' for e in self.relevant])
+        
+        # ⭐ 新增：显示候选QA（从第一个实体的related_qas中取前5个）
+        candidates_str = ""
+        if self.relevant and len(self.relevant) > 0 and hasattr(self.relevant[0], 'related_qas'):
+            candidate_ids = self.relevant[0].related_qas[:5]  # 取前5个
+            if candidate_ids:
+                candidates_str = f"\n\n可选择的候选QA（来自{self.relevant[0].name}）：\n```txt\n"
+                candidates_str += '\n'.join([f'- [QA-{cid}] (ID: {cid})' for cid in candidate_ids])
+                candidates_str += "\n```"
+        
         statements = '\n'.join(self.statements)
         return f"""
 当前问题: {self.qa['question']}
@@ -625,10 +640,10 @@ class AgentMemory:
 {statements}
 ```
 
-相关QA实体列表：
+相关QA实体列表（已组合的源QA）：
 ```txt
 {relevant}
-```
+```{candidates_str}
 """
     
     def statements_repr(self, additional=None):
