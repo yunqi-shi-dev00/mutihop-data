@@ -417,7 +417,19 @@ class SemiconductorQAEntity:
     
     def repr(self):
         """生成实体的文本表示"""
-        concepts_str = ', '.join(self.key_concepts) if self.key_concepts else '待提取'
+        # key_concepts现在是字符串列表
+        if self.key_concepts:
+            # 如果是字符串列表
+            if isinstance(self.key_concepts[0], str):
+                concepts_str = ', '.join(self.key_concepts)
+            # 如果是字典列表（兼容旧格式）
+            elif isinstance(self.key_concepts[0], dict):
+                concepts_str = ', '.join([c.get('name', str(c)) for c in self.key_concepts])
+            else:
+                concepts_str = ', '.join([str(c) for c in self.key_concepts])
+        else:
+            concepts_str = '待提取'
+            
         related_str = ', '.join([f"QA-{rid}" for rid in self.related_qas[:3]]) if self.related_qas else '无'
         
         question = self.qa_data.get('question', '')
