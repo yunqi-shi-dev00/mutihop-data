@@ -35,13 +35,13 @@ else
 fi
 echo ""
 
-echo "【检查4】agent_final_new.py - 是否提取available_ids？"
-if grep -q "available_ids = \", \".join(ids)" agent_final_new.py; then
-    echo "✅ 找到：available_ids 提取逻辑"
+echo "【检查4】agent_final_new.py - 是否提取available_ids并转为字符串？"
+if grep -q "str(e.id) for e in memory.relevant" agent_final_new.py; then
+    echo "✅ 找到：available_ids 提取逻辑（已转字符串）"
     echo "   行号："
-    grep -n "available_ids" agent_final_new.py | head -3
+    grep -n "str(e.id) for e in memory.relevant" agent_final_new.py | head -1
 else
-    echo "❌ 未找到available_ids提取"
+    echo "❌ 未找到available_ids提取或未转字符串"
 fi
 echo ""
 
@@ -66,11 +66,13 @@ fi
 echo ""
 
 # 检查FUZZ去重（之前的修复）
-echo "【检查7】prompts_final.py - FUZZ是否包含'禁止改回之前版本'？"
-if grep -q "禁止改回之前版本" prompts_final.py; then
-    echo "✅ 找到：FUZZ去重逻辑"
+echo "【检查7】agent_final_new.py - 是否修复类型匹配（str(e.id)）？"
+if grep -q "str(e.id) == str(action\['target'\])" agent_final_new.py; then
+    echo "✅ 找到：类型匹配修复（统一转字符串）"
+    echo "   行号："
+    grep -n "str(e.id) == str(action\['target'\])" agent_final_new.py | head -1
 else
-    echo "⚠️  未找到（可能需要添加）"
+    echo "❌ 未找到类型匹配修复"
 fi
 echo ""
 

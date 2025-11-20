@@ -565,7 +565,7 @@ class FinalSemiconductorQAAgent:
         # ⭐⭐⭐ 修复：提取可选ID列表 ⭐⭐⭐
         available_ids = ""
         if memory and memory.relevant:
-            ids = [e.id for e in memory.relevant]
+            ids = [str(e.id) for e in memory.relevant]  # ⭐ 转为字符串
             available_ids = ", ".join(ids)
         else:
             available_ids = "无"
@@ -787,7 +787,8 @@ class FinalSemiconductorQAAgent:
                     # ⭐⭐⭐ 修复：如果LLM编造了错误的ID，随机选一个有效的 ⭐⭐⭐
                     target = None
                     for e in memory.relevant:
-                        if e.id == action['target'] or e.url == action['target']:
+                        # ⭐ 修复：统一转为字符串比较，避免类型不匹配
+                        if str(e.id) == str(action['target']) or str(e.url) == str(action['target']):
                             target = e
                             break
                     
