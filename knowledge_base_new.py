@@ -458,13 +458,19 @@ class SemiconductorQAEntity:
 """
     
     def dict(self):
+        # ⭐ 确保 key_concepts 是字符串列表（兼容新旧格式）
+        if self.key_concepts and isinstance(self.key_concepts[0], dict):
+            key_concepts_str = [c.get('name', str(c)) for c in self.key_concepts]
+        else:
+            key_concepts_str = self.key_concepts
+        
         return {
             'id': self.id,
             'name': self.name,
             'url': self.url,
             'qa_data': self.qa_data,
             'summary': self.summary,
-            'key_concepts': self.key_concepts,
+            'key_concepts': key_concepts_str,  # 使用转换后的字符串列表
             'related_qas': self.related_qas
         }
 
