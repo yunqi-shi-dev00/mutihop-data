@@ -723,6 +723,10 @@ class FinalSemiconductorQAAgent:
             root_entity = await self.extract_qa_info(root_entity)
             memory.relevant.append(root_entity)
             
+            if self.debug_mode:
+                print(f"    [初始化] memory.relevant初始化为1个：[{root_entity.id}]")
+                print(f"    [初始化] 该实体有 {len(root_entity.related_qas)} 个相关QA可供选择")
+            
             # Step 2: 构建基础QA
             try:
                 base_qa = await self.construct_base_qa(root_entity)
@@ -839,8 +843,14 @@ class FinalSemiconductorQAAgent:
                     else:
                         candidates = target.related_qas
                     
+                    if self.debug_mode:
+                        print(f"  [SELECT] 找到 {len(candidates)} 个候选邻居")  # ⭐ 显示候选数量
+                    
                     exist_ids = [e.id for e in memory.relevant]
                     candidates = [c for c in candidates if c not in exist_ids]
+                    
+                    if self.debug_mode:
+                        print(f"  [SELECT] 排除已存在的，剩余 {len(candidates)} 个候选")  # ⭐ 显示过滤后数量
                     
                     if not candidates:
                         print(f"  [SELECT] ✗ 无可用邻居")
@@ -885,16 +895,16 @@ class FinalSemiconductorQAAgent:
                             relevance_score = bridge_validity.get('relevance_score', 0)
                             is_valid = bridge_validity.get('is_valid', False)
                             
-                            # ⭐⭐ 核心修改：只看分数，分数>=3就接受
-                            if relevance_score < 3:
+                            # ⭐⭐ 核心修改：只看分数，分数>=2就接受（进一步放宽）
+                            if relevance_score < 2:
                                 if self.debug_mode:
-                                    print(f"  [SELECT] ✗ 桥联分数过低 ({relevance_score} < 3)")
+                                    print(f"  [SELECT] ✗ 桥联分数过低 ({relevance_score} < 2)")
                                     print(f"  [原因] {bridge_validity['reason']}")
-                                continue  # 只有分数<3才拒绝
+                                continue  # 只有分数<2才拒绝
                             
                             if self.debug_mode:
-                                if not is_valid and relevance_score >= 3:
-                                    print(f"  [SELECT] ⚠️ 桥联分数{relevance_score}>=3，虽然判断为no但仍接受")
+                                if not is_valid and relevance_score >= 2:
+                                    print(f"  [SELECT] ⚠️ 桥联分数{relevance_score}>=2，虽然判断为no但仍接受")
                                 print(f"  [SELECT] ✓ 桥联合理 (分数: {relevance_score})")
                                 
                         except Exception as e:

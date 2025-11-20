@@ -341,8 +341,11 @@ class EnhancedSemiconductorKB:
             remaining_qas = [qid for qid in self.qa_ids if qid != qa_id and qid not in final_results]
             if remaining_qas:
                 additional_count = min(top_k - len(final_results), len(remaining_qas))
-                final_results.extend(random.sample(remaining_qas, additional_count))
-                # 示例：如果embedding找到5个，top_k=30，则补充25个随机QA
+                sampled = random.sample(remaining_qas, additional_count)
+                final_results.extend(sampled)
+                print(f"[KB] 保底补充：embedding找到{len(final_results)-len(sampled)}个，补充{len(sampled)}个，总计{len(final_results)}个")
+            else:
+                print(f"[KB] ⚠️ 无可补充的QA（KB总数: {len(self.qa_ids)}）")
         # ========================================
         
         return final_results
