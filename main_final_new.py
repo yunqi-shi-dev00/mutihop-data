@@ -80,6 +80,8 @@ def parse_args():
     # 🚀 新增：embedding相关
     parser.add_argument('--use-embedding', action='store_true',
                         help='使用语义embedding查找相关QA（需要安装sentence-transformers）')
+    parser.add_argument('--embedding-batch-size', type=int, default=4,
+                        help='Embedding生成的批量大小（默认4，减少内存占用）')
     
     # 功能开关
     parser.add_argument('--enable_dynamic_planning', action='store_true',
@@ -163,7 +165,11 @@ async def main():
     
     # 初始化知识库（支持embedding）
     try:
-        kb = EnhancedSemiconductorKB(qa_data, use_embedding=args.use_embedding)
+        kb = EnhancedSemiconductorKB(
+            qa_data, 
+            use_embedding=args.use_embedding,
+            embedding_batch_size=args.embedding_batch_size  # ⭐ 传递batch_size
+        )
     except Exception as e:
         print(f"[ERROR] 知识库初始化失败: {e}")
         sys.exit(1)

@@ -29,12 +29,15 @@ except Exception as e:
 class EnhancedSemiconductorKB:
     """增强版知识库 - 原版功能 + 消耗追踪 + 动态规划 + 语义embedding"""
     
-    def __init__(self, qa_data: List[Dict], use_embedding: bool = False):
+    def __init__(self, qa_data: List[Dict], use_embedding: bool = False, embedding_batch_size: int = 4):
         """
         Args:
             qa_data: QA数据列表
             use_embedding: 是否使用语义embedding查找相关QA（使用本地Qwen3-Embedding模型）
+            embedding_batch_size: Embedding生成的批量大小（默认4，减少内存占用）
         """
+        # ⭐⭐⭐ 优化：支持自定义embedding batch_size ⭐⭐⭐
+        self.embedding_batch_size = embedding_batch_size
         self.qa_data = {qa['id']: qa for qa in qa_data}
         self.qa_ids = list(self.qa_data.keys())
         
@@ -133,7 +136,9 @@ class EnhancedSemiconductorKB:
             
             # 批量生成embedding
             embeddings_list = []
-            batch_size = 8  # 根据GPU内存调整
+            # ⭐⭐⭐ 优化：支持自定义batch_size，默认4（减少内存占用）⭐⭐⭐
+            batch_size = getattr(self, 'embedding_batch_size', 4)  # 默认4，可通过参数设置
+            print(f"[KB] Embedding batch_size: {batch_size}")
             
             with torch.no_grad():
                 for i in range(0, len(qa_texts), batch_size):
@@ -160,6 +165,11 @@ class EnhancedSemiconductorKB:
                     batch_embeddings = (sum_embeddings / sum_mask).cpu().numpy()
                     
                     embeddings_list.append(batch_embeddings)
+                    
+                    # ⭐⭐⭐ 优化：及时清理显存 ⭐⭐⭐
+                    del inputs, outputs, token_embeddings, input_mask_expanded
+                    if device == "cuda":
+                        torch.cuda.empty_cache()
                     
                     # 显示进度
                     progress = min(i + batch_size, len(qa_texts))
@@ -299,7 +309,16 @@ class EnhancedSemiconductorKB:
         # 应用动态规划调整
         adjusted_results = self._apply_dynamic_planning(results, current_stage)
         
-        return [r['qa_id'] if isinstance(r, dict) else r for r in adjusted_results[:top_k]]
+        final_results = [r['qa_id'] if isinstance(r, dict) else r for r in adjusted_results[:top_k]]
+        
+        # ⭐⭐⭐ 保底机制：如果结果太少，补充随机QA ⭐⭐⭐
+        if len(final_results) < top_k:
+            remaining_qas = [qid for qid in self.qa_ids if qid != qa_id and qid not in final_results]
+            if remaining_qas:
+                additional_count = min(top_k - len(final_results), len(remaining_qas))
+                final_results.extend(random.sample(remaining_qas, additional_count))
+        
+        return final_results
     
     def _find_related_by_keywords(self, qa_id: str, top_k: int, current_stage: str) -> List[str]:
         """基于关键词匹配查找相关QA（原有逻辑增强版）"""
