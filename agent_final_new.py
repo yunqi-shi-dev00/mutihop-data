@@ -719,6 +719,18 @@ class FinalSemiconductorQAAgent:
             memory = AgentMemory()
             memory.uid = str(uuid.uuid4())
             
+            # ========================================
+            # 🔧 优化8：随机化max_hops（实现自然分布）
+            # 问题：固定max_hops导致所有QA都达到上限（都是3或4）
+            # 解决：为每个QA随机分配1-4跳，实现自然分布
+            # 效果：1跳25%、2跳25%、3跳25%、4跳25%
+            # ========================================
+            # ⭐ 为每个QA随机分配目标跳数（1-4）
+            target_hops = random.randint(1, 4)
+            if self.debug_mode:
+                print(f"[DEBUG] 本次QA目标跳数: {target_hops}")
+            # ========================================
+            
             print(f"\n{'='*60}")
             print(f"[START] 根实体: QA-{root_id}")
             if self.use_dynamic_planning:
@@ -803,13 +815,13 @@ class FinalSemiconductorQAAgent:
                 elif action['action'] == 'SELECT':
                     # ⭐⭐⭐ 核心优化点 ⭐⭐⭐
                     
-                    # ⚠️ 检查是否已达到最大跳数限制
-                    if num_hops >= self.max_hops:
-                        print(f"  [SELECT] 已达到最大跳数限制 ({self.max_hops})，跳过")
+                    # ⚠️ 检查是否已达到目标跳数
+                    if num_hops >= target_hops:
+                        print(f"  [SELECT] 已达到目标跳数 ({target_hops})，跳过")
                         continue
                     
                     if self.debug_mode:
-                        print(f"  [SELECT] ===== 开始SELECT流程 (当前{num_hops}跳，最多{self.max_hops}跳) =====")
+                        print(f"  [SELECT] ===== 开始SELECT流程 (当前{num_hops}跳，目标{target_hops}跳) =====")
                     
                     # ========================================
                     # 🔧 修复Bug 4：ID类型不匹配（查找错误）
@@ -1081,6 +1093,7 @@ class FinalSemiconductorQAAgent:
                 'num_turns': turn + 1,
                 'num_hops': num_hops,  # ⭐ 保持原逻辑：执行的SELECT次数+1
                 'final_qa_count': final_qa_count,  # 🆕 新增：最终的源QA数量
+                'target_hops': target_hops,  # 🆕 本次QA的目标跳数（1-4随机）
                 'max_hops': self.max_hops,
                 'qa_filtering_enabled': self.enable_qa_filtering,
                 'answer_regeneration_enabled': self.enable_answer_regeneration,
@@ -1096,7 +1109,7 @@ class FinalSemiconductorQAAgent:
             
             print(f"\n[DONE] 已保存: {output_file}")
             print(f"       问题: {memory.qa['question'][:80]}...")
-            print(f"       跳数: {num_hops} (最终源QA: {final_qa_count}个)")  # ⭐ 显示尝试跳数和最终源QA数
+            print(f"       跳数: {num_hops} / 目标: {target_hops} (最终源QA: {final_qa_count}个)")  # ⭐ 显示实际/目标跳数
             print(f"       答案长度: {len(memory.qa['answer'])} 字符")
             
             return output
