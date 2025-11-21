@@ -90,6 +90,15 @@ def parse_args():
     # ========================================
     parser.add_argument('--embedding-batch-size', type=int, default=4,
                         help='Embedding生成的批量大小（默认4，减少内存占用）')
+    # ========================================
+    # 🔧 优化10：支持自定义embedding模型路径
+    # 问题：用户可能用错模型（如7B模型），导致速度慢
+    # 解决：新增--embedding-model-path参数
+    # 推荐：使用Qwen3-Embedding-0.6B（快速）而不是Qwen2.5-7B（慢11倍）
+    # ========================================
+    parser.add_argument('--embedding-model-path', type=str, default=None,
+                        help='Embedding模型路径（可选，默认使用Qwen3-Embedding-0.6B）')
+    # ========================================
     
     # 功能开关
     parser.add_argument('--enable_dynamic_planning', action='store_true',
@@ -175,14 +184,16 @@ async def main():
     try:
         # ========================================
         # 🔧 修复Bug 7：Embedding模型内存不足（参数传递）
+        # 🔧 优化10：支持自定义embedding模型路径（参数传递）
         # 修复时间：2025-11-19
-        # 说明：将命令行参数embedding_batch_size传递给KB
-        # 效果：KB会使用用户指定的batch_size生成embedding
+        # 说明：将命令行参数embedding_batch_size和embedding_model_path传递给KB
+        # 效果：KB会使用用户指定的batch_size和模型路径生成embedding
         # ========================================
         kb = EnhancedSemiconductorKB(
             qa_data, 
             use_embedding=args.use_embedding,
-            embedding_batch_size=args.embedding_batch_size  # ⭐ 传递batch_size
+            embedding_batch_size=args.embedding_batch_size,  # ⭐ 传递batch_size
+            embedding_model_path=args.embedding_model_path  # ⭐ 传递模型路径（优化10）
         )
         # ========================================
     except Exception as e:

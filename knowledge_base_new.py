@@ -29,12 +29,13 @@ except Exception as e:
 class EnhancedSemiconductorKB:
     """增强版知识库 - 原版功能 + 消耗追踪 + 动态规划 + 语义embedding"""
     
-    def __init__(self, qa_data: List[Dict], use_embedding: bool = False, embedding_batch_size: int = 4):
+    def __init__(self, qa_data: List[Dict], use_embedding: bool = False, embedding_batch_size: int = 4, embedding_model_path: str = None):
         """
         Args:
             qa_data: QA数据列表
             use_embedding: 是否使用语义embedding查找相关QA（使用本地Qwen3-Embedding模型）
             embedding_batch_size: Embedding生成的批量大小（默认4，减少内存占用）
+            embedding_model_path: Embedding模型路径（可选，默认使用Qwen3-Embedding-0.6B）
         """
         # ========================================
         # 🔧 修复Bug 7：Embedding模型内存不足
@@ -45,6 +46,7 @@ class EnhancedSemiconductorKB:
         # ========================================
         # ⭐⭐⭐ 优化：支持自定义embedding batch_size ⭐⭐⭐
         self.embedding_batch_size = embedding_batch_size
+        self.embedding_model_path = embedding_model_path  # ⭐ 新增：自定义模型路径
         self.qa_data = {qa['id']: qa for qa in qa_data}
         self.qa_ids = list(self.qa_data.keys())
         
@@ -110,8 +112,19 @@ class EnhancedSemiconductorKB:
     def _build_embeddings(self):
         """🚀 构建QA的embedding向量（使用本地Qwen3-Embedding模型）"""
         try:
-            # 使用本地Qwen3-Embedding模型
-            local_model_path = "/mnt/data/LLM/hhh/qwen3_emb/backup_h/Qwen3-Embedding-0.6B_sft_v5"
+            # ========================================
+            # 🔧 优化10：支持自定义embedding模型路径
+            # 问题：用户可能用错模型（如7B模型），导致速度慢
+            # 解决：支持命令行参数指定模型路径
+            # ========================================
+            # 使用本地Qwen3-Embedding模型（默认0.6B，快速）
+            if self.embedding_model_path:
+                local_model_path = self.embedding_model_path
+                print(f"[KB] 使用用户指定的embedding模型: {local_model_path}")
+            else:
+                local_model_path = "/mnt/data/LLM/hhh/qwen3_emb/backup_h/Qwen3-Embedding-0.6B_sft_v5"
+                print(f"[KB] 使用默认embedding模型: {local_model_path}")
+            # ========================================
             
             print(f"[KB] 加载本地embedding模型: {local_model_path}")
             
