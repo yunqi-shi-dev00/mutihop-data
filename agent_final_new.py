@@ -571,21 +571,30 @@ class FinalSemiconductorQAAgent:
         # 问题2：memory.relevant只有1个，可选ID太少
         # 解决：从memory.relevant + 它们的related_qas中提取候选ID（最多显示5个）
         # ========================================
-        # ⭐⭐⭐ 修复：提取可选ID列表（已组合的 + 候选的）⭐⭐⭐
+        # ========================================
+        # 🔧 优化9：修正候选ID列表（只显示候选，不包含已组合的）
+        # 问题：之前包含了已组合的QA，导致可能重复选择
+        # 解决：只显示候选QA（未组合的），更清晰
+        # ========================================
         available_ids = ""
         if memory and memory.relevant:
-            # 已组合的QA
-            ids = [str(e.id) for e in memory.relevant]
+            # 已组合的QA ID（用于排除）
+            existing_ids = [str(e.id) for e in memory.relevant]
             
-            # ⭐ 优化：添加候选QA（从第一个实体的related_qas中取前3个）
+            # ⭐ 只收集候选QA（排除已组合的）
+            candidate_ids = []
             if len(memory.relevant) > 0 and hasattr(memory.relevant[0], 'related_qas'):
-                candidate_ids = memory.relevant[0].related_qas[:3]  # 前3个候选
-                candidate_ids = [str(cid) for cid in candidate_ids if str(cid) not in ids][:3]  # 排除已有的
-                ids.extend(candidate_ids)
+                for cid in memory.relevant[0].related_qas[:5]:  # 前5个候选
+                    if str(cid) not in existing_ids:
+                        candidate_ids.append(str(cid))
+                        if len(candidate_ids) >= 3:  # 最多3个
+                            break
             
-            available_ids = ", ".join(ids)  # "8691, 2048, 3072, 4096"
+            # ⭐ 可选ID只包含候选QA（不包含已组合的）
+            available_ids = ", ".join(candidate_ids) if candidate_ids else "无"
         else:
             available_ids = "无"
+        # ========================================
         
         actions = [
             SemiconductorQAPrompts.FUZZ,
@@ -608,8 +617,14 @@ class FinalSemiconductorQAAgent:
         action = self._safe_json_parse(text, debug_prefix="选择动作")
         
         if action is None or 'action' not in action:
-            # 解析失败，返回默认action
-            return {'action': 'FUZZ', 'question': state, 'note': 'JSON解析失败，默认FUZZ'}
+            # ========================================
+            # 🔧 优化9：改进FUZZ容错（避免嵌套复制整个状态）
+            # 问题：之前直接用state（包含整个memory描述）作为问题
+            # 解决：只保留当前问题，避免嵌套
+            # ========================================
+            # 解析失败，默认EXIT（避免生成错误的嵌套问题）
+            return {'action': 'EXIT', 'note': 'JSON解析失败，为避免错误直接退出'}
+            # ========================================
         
         assert action['action'] in ['SELECT', 'FUZZ', 'EXIT', 'BRAINSTORM']
         return action
