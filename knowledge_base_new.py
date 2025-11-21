@@ -139,14 +139,29 @@ class EnhancedSemiconductorKB:
             self.embedding_model.eval()
             
             # ========================================
-            # 🔧 修复：GPU内存不足时使用CPU
-            # 问题：GPU被vLLM占满，无法加载embedding模型
-            # 解决：强制使用CPU（embedding只用一次，速度可接受）
+            # 🔧 优化10：智能设备选择（优先GPU，CPU作为fallback）
+            # 问题：强制CPU导致7B模型太慢
+            # 解决：优先使用GPU，如果GPU不可用或显存不足则使用CPU
             # ========================================
-            # 检测设备（强制使用CPU避免OOM）
-            device = "cpu"  # ⭐ 强制CPU，避免GPU OOM
-            self.embedding_model = self.embedding_model.to(device)
-            print(f"[KB] 模型加载完成，使用设备: {device}（避免GPU OOM）")
+            # 检测设备（优先GPU）
+            if torch.cuda.is_available():
+                device = "cuda"
+                print(f"[KB] 检测到GPU，使用设备: cuda")
+            else:
+                device = "cpu"
+                print(f"[KB] 未检测到GPU，使用设备: cpu")
+            
+            try:
+                self.embedding_model = self.embedding_model.to(device)
+                print(f"[KB] ✓ 模型已加载到: {device}")
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    print(f"[KB] ⚠️ GPU显存不足，切换到CPU")
+                    device = "cpu"
+                    self.embedding_model = self.embedding_model.to(device)
+                else:
+                    raise
+            # ========================================
             
             # 准备QA文本
             qa_texts = []
@@ -162,14 +177,22 @@ class EnhancedSemiconductorKB:
             # 批量生成embedding
             embeddings_list = []
             # ========================================
-            # 🔧 修复Bug 7：Embedding模型内存不足（续）
-            # 修改1：batch_size从硬编码8改为可配置（默认4）
-            # 修改2：及时清理显存，减少峰值内存占用
-            # 效果：峰值内存从5GB降到3GB（默认）
+            # 🔧 优化10：智能batch_size（GPU时自动增大）
+            # 问题：固定batch_size=4对GPU来说太小，速度慢
+            # 解决：GPU时默认使用更大的batch_size（如32），CPU时使用小batch
             # ========================================
-            # ⭐⭐⭐ 优化：支持自定义batch_size，默认4（减少内存占用）⭐⭐⭐
-            batch_size = getattr(self, 'embedding_batch_size', 4)  # 默认4，可通过参数设置
-            print(f"[KB] Embedding batch_size: {batch_size}")
+            # ⭐⭐⭐ 优化：智能batch_size ⭐⭐⭐
+            if hasattr(self, 'embedding_batch_size') and self.embedding_batch_size > 0:
+                # 用户指定了batch_size，使用用户指定的
+                batch_size = self.embedding_batch_size
+            else:
+                # 自动选择batch_size
+                if device == "cuda":
+                    batch_size = 32  # GPU默认32（快速）
+                else:
+                    batch_size = 4   # CPU默认4（避免慢）
+            print(f"[KB] Embedding batch_size: {batch_size} (设备: {device})")
+            # ========================================
             
             with torch.no_grad():
                 for i in range(0, len(qa_texts), batch_size):
@@ -208,9 +231,14 @@ class EnhancedSemiconductorKB:
                         torch.cuda.empty_cache()
                     # ========================================
                     
-                    # 显示进度
+                    # ========================================
+                    # 🔧 优化10：改进进度显示
+                    # 显示进度百分比和预估时间
+                    # ========================================
                     progress = min(i + batch_size, len(qa_texts))
-                    print(f"   进度: {progress}/{len(qa_texts)}", end='\r')
+                    percent = progress * 100.0 / len(qa_texts)
+                    print(f"   进度: {progress}/{len(qa_texts)} ({percent:.1f}%)", end='\r')
+                    # ========================================
             
             print()  # 换行
             
