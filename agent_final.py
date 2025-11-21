@@ -1,0 +1,736 @@
+"""
+半导体QA生成系统 - 最终优化Agent
+完全按用户要求：
+1. 每次SELECT用所有子QA生成多跳问题（而不是只组合2个）
+2. 使用用户给的组合模板（带推理步骤）
+3. 筛选 → 答案重生成（强调围绕子QA，不发散）
+"""
+
+import json
+import copy
+import uuid
+import random
+import asyncio
+from collections import defaultdict
+from typing import Dict, List, Any, Optional
+from transformers import AutoTokenizer
+
+from prompts_final import SemiconductorQAPrompts
+from knowledge_base import EnhancedSemiconductorKB, SemiconductorQAEntity, AgentMemory
+from llm_client import LLMAPIClient
+
+
+class FinalSemiconductorQAAgent:
+    """
+    最终优化Agent - 完全按用户要求
+    
+    核心逻辑：
+    1. 保持action机制不变（SELECT/FUZZ/EXIT/BRAINSTORM）
+    2. 保持迭代循环结构不变
+    3. 每次SELECT：收集新子QA → 用所有子QA生成多跳问题 → 筛选 → 答案重生成
+    4. 多跳自然形成：SELECT执行N次 = (N+1)跳
+    """
+    
+    def __init__(self, knowledge_base: EnhancedSemiconductorKB, 
+                 llm_client: LLMAPIClient, 
+                 tokenizer_path: str,
+                 max_turns: int = 16,
+                 max_hops: int = 3,  # ⭐ 新增：最多组合3个问题
+                 use_dynamic_planning: bool = True,
+                 enable_qa_filtering: bool = True,
+                 enable_answer_regeneration: bool = True,
+                 debug_mode: bool = True):
+        self.kb = knowledge_base
+        self.llm_client = llm_client
+        self.max_turns = max_turns
+        self.max_hops = max_hops  # 最多组合的问题数量
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        
+        # 动态规划
+        self.use_dynamic_planning = use_dynamic_planning
+        if use_dynamic_planning:
+            self.current_stage = 'early'
+            self.stage_thresholds = {'early': 0.6, 'mid': 0.2}
+            print(f"[Agent] ✓ 启用动态规划策略")
+        else:
+            print(f"[Agent] 使用原版生成策略")
+        
+        # 优化功能开关
+        self.enable_qa_filtering = enable_qa_filtering
+        self.enable_answer_regeneration = enable_answer_regeneration
+        self.debug_mode = debug_mode
+        
+        if enable_qa_filtering:
+            print(f"[Agent] ✓ 启用问题筛选（在SELECT后执行）")
+        if enable_answer_regeneration:
+            print(f"[Agent] ✓ 启用答案重生成（在SELECT后执行，强调围绕子QA）")
+        if debug_mode:
+            print(f"[Agent] ✓ 启用调试模式")
+        
+        # 输出关键配置
+        print(f"[Agent] 最大迭代轮数: {self.max_turns}, 最多组合问题数: {self.max_hops}")
+    
+    # ============ 阶段管理 ============
+    
+    def update_generation_stage(self):
+        """更新生成阶段"""
+        if not self.use_dynamic_planning:
+            return
+        
+        stats = self.kb.get_usage_stats()
+        active_rate = stats['active_papers'] / stats['total_papers']
+        
+        old_stage = self.current_stage
+        
+        if active_rate > self.stage_thresholds['early']:
+            self.current_stage = 'early'
+        elif active_rate > self.stage_thresholds['mid']:
+            self.current_stage = 'mid'
+        else:
+            self.current_stage = 'late'
+        
+        if old_stage != self.current_stage:
+            print(f"\n[STAGE] 阶段切换: {old_stage} → {self.current_stage}")
+            print(f"        活跃论文率: {active_rate*100:.1f}%")
+    
+    def select_root_qa_smart(self) -> str:
+        """智能选择根QA"""
+        if not self.use_dynamic_planning:
+            return random.choice(self.kb.qa_ids)
+        
+        self.update_generation_stage()
+        
+        if self.current_stage == 'early':
+            return random.choice(self.kb.qa_ids)
+        elif self.current_stage == 'mid':
+            if random.random() < 0.7:
+                return self.kb.select_underutilized_qa()
+            else:
+                return random.choice(self.kb.qa_ids)
+        else:
+            return self.kb.select_underutilized_qa()
+    
+    # ============ LLM调用 ============
+    
+    async def call_llm(self, prompt: str, temperature: float = 0.8) -> str:
+        """调用LLM"""
+        prompt_formatted = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            add_generation_prompt=True,
+            tokenize=False
+        )
+        
+        max_new_tokens = 8000 - self.tokenizer([prompt_formatted], return_length=True)["length"][0]
+        max_new_tokens = max(max_new_tokens, 512)
+        
+        sampling_kwargs = {
+            "temperature": temperature,
+            "top_p": 0.95,
+            "top_k": 1000,
+            "max_new_tokens": max_new_tokens,
+            "n": 1,
+            "stop_token_ids": [151645, 151643]
+        }
+        
+        output = await self.llm_client.async_generate(prompt_formatted, sampling_kwargs)
+        return output["text"]
+    
+    # ============ QA实体信息提取 ============
+    
+    async def extract_qa_info(self, entity: SemiconductorQAEntity) -> SemiconductorQAEntity:
+        """提取QA信息"""
+        if self.debug_mode:
+            print(f"    [提取] 实体 {entity.id}")
+        
+        try:
+            content = entity.qa_data.get('question', '') + ' ' + entity.qa_data.get('answer', '')
+            prompt = SemiconductorQAPrompts.extract_key_concepts.format(content=content)
+            text = await self.call_llm(prompt, temperature=0.7)
+            concepts_list = json.loads(text.split('```json')[1].split('```')[0].strip())
+            entity.key_concepts = [item['concept'] for item in concepts_list]
+        except:
+            entity.key_concepts = []
+        
+        try:
+            question = entity.qa_data.get('question', '')
+            answer = entity.qa_data.get('answer', '')
+            prompt = SemiconductorQAPrompts.summarize_qa.format(question=question, answer=answer)
+            text = await self.call_llm(prompt, temperature=0.7)
+            if '<summary>' in text and '</summary>' in text:
+                entity.summary = text.split('<summary>')[1].split('</summary>')[0].strip()
+            else:
+                entity.summary = text[:100]
+        except:
+            entity.summary = "待生成"
+        
+        if self.use_dynamic_planning:
+            entity.related_qas = self.kb.find_related_qas_prioritized(entity.id, top_k=10)
+        else:
+            entity.related_qas = self.kb.find_related_qas(entity.id, top_k=10)
+        
+        return entity
+    
+    # ============ QA构建 ============
+    
+    async def construct_base_qa(self, entity: SemiconductorQAEntity) -> Dict:
+        """构建基础QA"""
+        if self.debug_mode:
+            print(f"    [构建] 基础QA")
+        
+        content = entity.repr()
+        prompt = SemiconductorQAPrompts.base_qa.format(content=content)
+        text = await self.call_llm(prompt)
+        base_qa = json.loads(text.split('```json')[1].split('```')[0].strip())
+        return base_qa
+    
+    async def construct_link_qa(self, entityA: SemiconductorQAEntity, 
+                                entityB: SemiconductorQAEntity) -> Dict:
+        """构建关联QA"""
+        if self.debug_mode:
+            print(f"    [桥联] {entityA.id} → {entityB.id}")
+        
+        prompt = SemiconductorQAPrompts.link_qa.format(
+            conceptA=entityA.name,
+            conceptB=entityB.name,
+            contentA=entityA.repr(),
+            contentB=entityB.repr()
+        )
+        text = await self.call_llm(prompt)
+        link_qa = json.loads(text.split('```json')[1].split('```')[0].strip())
+        return link_qa
+    
+    # ============ ⭐ 关键：用所有子QA生成多跳问题 ============
+    
+    async def generate_multihop_question(self, all_sub_qas: List[SemiconductorQAEntity],
+                                        statements: List[str]) -> Dict:
+        """
+        ⭐ 核心方法：基于所有已收集的子QA，生成多跳问题
+        
+        Args:
+            all_sub_qas: 所有已收集的子QA实体列表
+            statements: 技术陈述列表
+        
+        Returns:
+            包含question, answer(参考答案), reasoning_steps等的字典
+        """
+        num_hops = len(all_sub_qas)
+        
+        # ⚠️ 安全检查：至少需要2个子QA才能生成多跳问题
+        if num_hops < 2:
+            if self.debug_mode:
+                print(f"    [多跳组合] 错误：子QA数量不足（需要>=2，实际{num_hops}）")
+            return None
+        
+        if self.debug_mode:
+            print(f"    [多跳组合] 基于{num_hops}个子QA生成{num_hops}跳问题")
+        
+        # 格式化单跳QA
+        single_hop_str = "\n\n".join([
+            f"单跳QA-{i+1}:\n"
+            f"问题: {qa.qa_data['question']}\n"
+            f"答案: {qa.qa_data['answer']}\n"
+            f"来源: {qa.qa_data.get('paper_name', 'unknown')}"
+            for i, qa in enumerate(all_sub_qas)
+        ])
+        
+        # 格式化陈述
+        statements_str = "\n".join(statements)
+        
+        # 调用用户给的多跳组合模板
+        prompt = SemiconductorQAPrompts.compose_qa_multihop.format(
+            num_hops=num_hops,
+            single_hop_qas=single_hop_str,
+            statements=statements_str
+        )
+        
+        try:
+            text = await self.call_llm(prompt, temperature=0.8)
+            result = json.loads(text.split('```json')[1].split('```')[0].strip())
+            
+            if self.debug_mode:
+                print(f"    [多跳组合] 成功生成{num_hops}跳问题")
+                print(f"    [多跳组合] 问题: {result['question'][:60]}...")
+            
+            return result
+        except Exception as e:
+            if self.debug_mode:
+                print(f"    [多跳组合] 失败: {e}")
+            return None
+    
+    # ============ 筛选和答案重生成 ============
+    
+    async def evaluate_question(self, question: str, sub_qas: List[SemiconductorQAEntity]) -> Dict:
+        """筛选问题（用户给的评估模板）"""
+        if self.debug_mode:
+            print(f"    [筛选] 评估问题")
+        
+        sub_qa_content = "\n\n".join([
+            f"子问答对-{i+1}:\n"
+            f"问题: {qa.qa_data['question']}\n"
+            f"答案: {qa.qa_data['answer']}\n"
+            f"来源: {qa.qa_data.get('paper_name', 'unknown')}"
+            for i, qa in enumerate(sub_qas)
+        ])
+        
+        prompt = SemiconductorQAPrompts.question_evaluation.format(
+            sub_qa_content=sub_qa_content,
+            academic_question=question
+        )
+        
+        try:
+            text = await self.call_llm(prompt, temperature=0.3)
+            
+            if '【是】' in text:
+                passed = True
+                reason = "通过所有6个评估标准"
+            elif '【否】' in text:
+                passed = False
+                reason = "未通过评估标准"
+            else:
+                passed = False
+                reason = f"格式异常: {text[:50]}"
+            
+            if self.debug_mode:
+                print(f"    [筛选] {'✓ 通过' if passed else '✗ 未通过'}")
+            
+            return {'passed': passed, 'reason': reason}
+        except Exception as e:
+            if self.debug_mode:
+                print(f"    [筛选] 异常: {e}")
+            return {'passed': False, 'reason': str(e)}
+    
+    async def regenerate_answer(self, question: str, reference_answer: str,
+                                sub_qas: List[SemiconductorQAEntity],
+                                reasoning_steps: List[str]) -> Dict:
+        """答案重生成（用户给的模板，强调围绕子QA）"""
+        if self.debug_mode:
+            print(f"    [答案] 重新生成（强调围绕子QA，不发散）")
+        
+        sub_qa_str = "\n\n".join([
+            f"子问答对-{i+1}:\n"
+            f"问题: {qa.qa_data['question']}\n"
+            f"答案: {qa.qa_data['answer']}"
+            for i, qa in enumerate(sub_qas)
+        ])
+        
+        reasoning_str = "\n".join(reasoning_steps) if reasoning_steps else "无"
+        
+        prompt = SemiconductorQAPrompts.answer_regeneration.format(
+            question=question,
+            reference_answer=reference_answer,
+            sub_qa_pairs=sub_qa_str,
+            reasoning_steps=reasoning_str
+        )
+        
+        try:
+            text = await self.call_llm(prompt, temperature=0.7)
+            result = json.loads(text.split('```json')[1].split('```')[0].strip())
+            
+            if self.debug_mode:
+                grounded = result.get('grounded_check', {})
+                print(f"    [答案] 成功，置信度: {result.get('confidence', 0):.2f}")
+                print(f"    [答案] 基于子QA: {grounded.get('all_info_from_subqa', False)}")
+            
+            return result
+        except Exception as e:
+            if self.debug_mode:
+                print(f"    [答案] 失败: {e}")
+            return {
+                'final_answer': reference_answer,
+                'reasoning_trace': '',
+                'confidence': 0.5,
+                'grounded_check': {
+                    'all_info_from_subqa': False,
+                    'no_external_knowledge': False,
+                    'complete_reasoning': False
+                }
+            }
+    
+    # ============ Action选择 ============
+    
+    async def choose_action(self, state: str, ready_to_exit: bool = False) -> Dict:
+        """选择下一步操作"""
+        actions = [
+            SemiconductorQAPrompts.FUZZ,
+            SemiconductorQAPrompts.SELECT,
+        ]
+        random.shuffle(actions)
+        
+        if ready_to_exit:
+            actions.append(SemiconductorQAPrompts.EXIT)
+        
+        prompt = SemiconductorQAPrompts.action.format(
+            question=state,
+            actions='\n\n'.join(actions)
+        )
+        
+        text = await self.call_llm(prompt)
+        action = json.loads(text.split('```json')[1].split('```')[0].strip())
+        
+        assert action['action'] in ['SELECT', 'FUZZ', 'EXIT', 'BRAINSTORM']
+        return action
+    
+    # ============ 验证和检查 ============
+    
+    async def check_info_cover(self, statement: str, prior_statements: str) -> bool:
+        """检查信息覆盖"""
+        prompt = SemiconductorQAPrompts.check_info_cover.format(
+            prior=prior_statements,
+            current=statement
+        )
+        text = await self.call_llm(prompt, temperature=0.3)
+        result = json.loads(text.split('```json')[1].split('```')[0].strip())
+        return result['judgement'] == 'yes'
+    
+    async def check_qa_valid(self, state: str) -> bool:
+        """检查QA有效性"""
+        prompt = SemiconductorQAPrompts.qa_valid_check.format(question=state)
+        text = await self.call_llm(prompt, temperature=0.3)
+        result = json.loads(text.split('```json')[1].split('```')[0].strip())
+        return 'yes' in result['judgement']
+    
+    async def direct_generate(self, question: str, n: int = 1) -> List[str]:
+        """直接生成答案"""
+        prompt = SemiconductorQAPrompts.direct_gen_check.format(question=question)
+        prompt = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            add_generation_prompt=True,
+            tokenize=False
+        )
+        
+        max_new_tokens = 8000 - self.tokenizer([prompt], return_length=True)["length"][0]
+        max_new_tokens = max(max_new_tokens, 512)
+        
+        sampling_kwargs = {
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 1000,
+            "max_new_tokens": max_new_tokens,
+            "n": n,
+            "stop_token_ids": [151645, 151643]
+        }
+        
+        output = await self.llm_client.async_generate(prompt, sampling_kwargs)
+        texts = [output["text"]] if not isinstance(output["text"], list) else output["text"]
+        
+        answers = []
+        for text in texts:
+            if '<answer>' in text and '</answer>' in text:
+                answers.append(text.split('<answer>')[1].split('</answer>')[0].strip())
+            else:
+                answers.append(None)
+        
+        return answers
+    
+    async def llm_judge_answer(self, question: str, answers: List[str], 
+                              gt_answer: str) -> List[bool]:
+        """LLM判断答案正确性"""
+        corrects = []
+        for ans in answers:
+            if ans is None:
+                corrects.append(False)
+            else:
+                prompt = SemiconductorQAPrompts.llm_judge.format(
+                    question=question,
+                    gt_answer=gt_answer,
+                    pred_answer=ans
+                )
+                text = await self.call_llm(prompt, temperature=0.3)
+                corrects.append('Correct' in text)
+        return corrects
+    
+    # ============ ⭐ 主生成流程 ============
+    
+    async def generate(self, semaphore: asyncio.Semaphore, save_path: str):
+        """
+        主生成流程
+        
+        核心：每次SELECT收集新子QA后，用所有子QA重新生成多跳问题
+        """
+        async with semaphore:
+            if self.debug_mode:
+                print(f"\n{'='*80}")
+                print(f"[开始] 新QA生成")
+                print(f"{'='*80}")
+            
+            # Step 1: 选择根QA
+            root_id = self.select_root_qa_smart()
+            root_qa_data = self.kb.get_qa(root_id)
+            
+            memory = AgentMemory()
+            memory.uid = str(uuid.uuid4())
+            
+            print(f"\n{'='*60}")
+            print(f"[START] 根实体: QA-{root_id}")
+            if self.use_dynamic_planning:
+                print(f"        阶段: {self.current_stage}")
+            print(f"{'='*60}\n")
+            
+            self.kb.update_usage([root_id])
+            
+            # 创建根实体
+            root_entity = SemiconductorQAEntity(root_id, root_qa_data, self.kb)
+            root_entity = await self.extract_qa_info(root_entity)
+            memory.relevant.append(root_entity)
+            
+            # Step 2: 构建基础QA
+            try:
+                base_qa = await self.construct_base_qa(root_entity)
+            except Exception as e:
+                print(f"[ERROR] 构建基础QA失败: {e}")
+                return None
+            
+            if not (isinstance(base_qa, dict) and all(k in base_qa for k in ['question', 'answer', 'statement'])):
+                print("[ERROR] 基础QA格式错误")
+                return None
+            
+            memory.qa['question'] = base_qa['question']
+            memory.qa['answer'] = base_qa['answer']
+            memory.statements.append(base_qa['statement'])
+            memory.qa_history.append(base_qa)
+            
+            print(f"\n[BASE QA] {base_qa['question']}")
+            
+            ready_to_exit = False
+            action_stats = defaultdict(int)
+            num_hops = 1
+            
+            # Step 3: ⭐ 迭代优化循环
+            for turn in range(self.max_turns):
+                print(f"\n{'--- 第 ' + str(turn+1) + ' 轮 ---'}")
+                
+                state = memory.repr()
+                
+                if turn == 0:
+                    action = {'action': 'none'}
+                else:
+                    try:
+                        action = await self.choose_action(state, ready_to_exit)
+                    except Exception as e:
+                        print(f"[WARNING] 选择动作失败: {e}")
+                        continue
+                
+                action_stats[action['action']] += 1
+                print(f"[ACTION] {action['action']} - {action.get('note', '')}")
+                
+                q_new = None
+                memory_new = copy.deepcopy(memory)
+                
+                # ============ 执行Action ============
+                
+                if action['action'] == 'FUZZ':
+                    q_new = action['question']
+                    memory_new.edit_history.append(f"FUZZ: {q_new[:50]}...")
+                
+                elif action['action'] == 'EXIT':
+                    print("[INFO] 退出")
+                    break
+                
+                elif action['action'] == 'none':
+                    assert turn == 0
+                    q_new = base_qa['question']
+                
+                elif action['action'] == 'SELECT':
+                    # ⭐⭐⭐ 核心优化点 ⭐⭐⭐
+                    
+                    # ⚠️ 检查是否已达到最大跳数限制
+                    if num_hops >= self.max_hops:
+                        print(f"[INFO] 已达到最大跳数限制 ({self.max_hops})，跳过SELECT")
+                        continue
+                    
+                    if self.debug_mode:
+                        print(f"  [SELECT] ===== 开始SELECT流程 (当前{num_hops}跳，最多{self.max_hops}跳) =====")
+                    
+                    # (1) 找目标实体
+                    target = None
+                    for e in memory.relevant:
+                        if e.id == action['target'] or e.url == action['target']:
+                            target = e
+                            break
+                    
+                    if target is None:
+                        print(f"[WARNING] 未找到目标")
+                        continue
+                    
+                    # (2) 找邻居
+                    if self.use_dynamic_planning:
+                        candidates = self.kb.find_related_qas_prioritized(target.id, top_k=10)
+                    else:
+                        candidates = target.related_qas
+                    
+                    exist_ids = [e.id for e in memory.relevant]
+                    candidates = [c for c in candidates if c not in exist_ids]
+                    
+                    if not candidates:
+                        print(f"[WARNING] 无可用邻居")
+                        continue
+                    
+                    neighbor_id = random.choice(candidates)
+                    print(f"  [SELECT] {target.id} → {neighbor_id}")
+                    
+                    self.kb.update_usage([neighbor_id])
+                    
+                    neighbor_data = self.kb.get_qa(neighbor_id)
+                    neighbor_entity = SemiconductorQAEntity(neighbor_id, neighbor_data, self.kb)
+                    neighbor_entity = await self.extract_qa_info(neighbor_entity)
+                    
+                    # (3) 构建link_qa
+                    try:
+                        link_qa = await self.construct_link_qa(target, neighbor_entity)
+                    except Exception as e:
+                        print(f"[WARNING] 构建link_qa失败: {e}")
+                        continue
+                    
+                    # (4) 检查重复
+                    try:
+                        duplicate = await self.check_info_cover(
+                            link_qa['statement'],
+                            memory_new.statements_repr()
+                        )
+                    except Exception as e:
+                        print(f"[WARNING] 检查重复失败: {e}")
+                        continue
+                    
+                    if duplicate:
+                        print("[WARNING] 陈述重复")
+                        continue
+                    
+                    # (5) ⭐ 关键：添加新子QA，用所有子QA生成多跳问题
+                    memory_new.relevant.append(neighbor_entity)
+                    memory_new.statements.append(link_qa['statement'])
+                    
+                    # ⚠️ 确保至少有2个子QA
+                    if len(memory_new.relevant) < 2:
+                        print(f"[WARNING] 子QA数量不足（{len(memory_new.relevant)}），跳过")
+                        memory_new.relevant.pop()
+                        memory_new.statements.pop()
+                        continue
+                    
+                    multihop_result = await self.generate_multihop_question(
+                        memory_new.relevant,
+                        memory_new.statements
+                    )
+                    
+                    if multihop_result is None:
+                        print(f"[WARNING] 多跳生成失败")
+                        memory_new.relevant.pop()
+                        memory_new.statements.pop()
+                        continue
+                    
+                    q_new = multihop_result['question']
+                    reference_answer = multihop_result['answer']
+                    reasoning_steps = multihop_result.get('reasoning_steps', [])
+                    
+                    # (6) 筛选
+                    if self.enable_qa_filtering:
+                        eval_result = await self.evaluate_question(q_new, memory_new.relevant)
+                        
+                        if not eval_result['passed']:
+                            print(f"  [SELECT] ✗ 未通过筛选：{eval_result['reason']}")
+                            memory_new.relevant.pop()
+                            memory_new.statements.pop()
+                            continue
+                        
+                        print(f"  [SELECT] ✓ 通过筛选")
+                    
+                    # (7) 答案重生成
+                    if self.enable_answer_regeneration:
+                        regen_result = await self.regenerate_answer(
+                            q_new,
+                            reference_answer,
+                            memory_new.relevant,
+                            reasoning_steps
+                        )
+                        
+                        grounded_check = regen_result.get('grounded_check', {})
+                        if grounded_check.get('all_info_from_subqa', False) and regen_result.get('confidence', 0) >= 0.6:
+                            final_answer = regen_result['final_answer']
+                            print(f"  [SELECT] ✓ 使用重生成答案")
+                        else:
+                            final_answer = reference_answer
+                            print(f"  [SELECT] ⚠ 使用参考答案")
+                    else:
+                        final_answer = reference_answer
+                    
+                    # (8) 更新memory
+                    memory_new.qa['answer'] = final_answer
+                    memory_new.edit_history.append(f"SELECT: {target.id} → {neighbor_id}")
+                    
+                    num_hops += 1
+                    
+                    if self.debug_mode:
+                        print(f"  [SELECT] 当前跳数: {num_hops}")
+                        print(f"  [SELECT] ===== SELECT完成 =====")
+                
+                # ============ 验证和测试 ============
+                
+                if q_new is None:
+                    continue
+                
+                print(f"\n[NEW Q] {q_new}\n")
+                memory_new.qa['question'] = q_new
+                
+                # 验证
+                try:
+                    valid = await self.check_qa_valid(memory_new.repr())
+                except Exception as e:
+                    print(f"[WARNING] 验证失败: {e}")
+                    valid = False
+                
+                if not valid:
+                    print(f"[WARNING] 第{turn+1}轮无效")
+                    continue
+                
+                # 测试
+                try:
+                    answers = await self.direct_generate(q_new, n=4)
+                except Exception as e:
+                    print(f"[WARNING] 生成失败: {e}")
+                    continue
+                
+                try:
+                    corrects = await self.llm_judge_answer(q_new, answers, memory_new.qa['answer'])
+                except Exception as e:
+                    print(f"[WARNING] 判断失败: {e}")
+                    continue
+                
+                correct_count = sum(corrects)
+                print(f"[TEST] 正确率: {correct_count}/4")
+                
+                if correct_count >= 2:
+                    memory = memory_new
+                    ready_to_exit = True
+                    print("[INFO] 测试通过")
+                else:
+                    print("[INFO] 测试未通过")
+            
+            # Step 4: 保存
+            output = {
+                'uid': memory.uid,
+                'question': memory.qa['question'],
+                'answer': memory.qa['answer'],
+                'source_qa_ids': [e.id for e in memory.relevant],
+                'source_papers': list(set([e.qa_data.get('paper_name', 'unknown') for e in memory.relevant])),
+                'statements': memory.statements,
+                'edit_history': memory.edit_history,
+                'action_stats': dict(action_stats),
+                'num_turns': turn + 1,
+                'num_hops': num_hops,
+                'max_hops': self.max_hops,
+                'qa_filtering_enabled': self.enable_qa_filtering,
+                'answer_regeneration_enabled': self.enable_answer_regeneration,
+                'dynamic_planning_enabled': self.use_dynamic_planning
+            }
+            
+            import os
+            os.makedirs(save_path, exist_ok=True)
+            output_file = os.path.join(save_path, f"{memory.uid}.json")
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(output, f, ensure_ascii=False, indent=2)
+            
+            print(f"\n[DONE] 已保存: {output_file}")
+            print(f"       问题: {memory.qa['question'][:80]}...")
+            print(f"       跳数: {num_hops}")
+            print(f"       答案长度: {len(memory.qa['answer'])} 字符")
+            
+            return output
